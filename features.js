@@ -104,5 +104,36 @@ function commitStatementPreview(data,id,at){const entry=(data.bankImports||[]).f
 next=applyBankRows(next,id,rows.map(row=>({...row,ledger:row.ledger==='expense'||row.ledger==='income'||row.ledger==='ignore'?undefined:row.ledger})),at);
 for(const pending of [...(next.bankImports.find(x=>x.id===id).unresolvedRows||[])])if(rows.find(r=>r.sourceKey===pending.sourceKey)?.forceNew||pending.candidateIds?.every(candidateId=>![...data.records,...(data.incomeRecords||[]),...(data.insuranceRecords||[]),...(data.taxPaymentRecords||[])].some(record=>record.id===candidateId)))next=resolveBankRow(next,id,pending.sourceKey,'add',null,at);const beforeExpenseIds=new Set(data.records.map(r=>r.id)),beforeIncomeIds=new Set((data.incomeRecords||[]).map(r=>r.id));next.records=next.records.map(record=>{if(beforeExpenseIds.has(record.id))return record;const row=rows.find(r=>bankSourceKnown(record,r.sourceKey));return row?{...record,category:row.category||BANK_REVIEW_CATEGORY,bankReview:row.category&&row.category!==BANK_REVIEW_CATEGORY?'reviewed':'pending'}:record;});next.incomeRecords=(next.incomeRecords||[]).map(record=>{if(beforeIncomeIds.has(record.id))return record;const row=rows.find(r=>bankSourceKnown(record,r.sourceKey));return row?{...record,countryGroup:row.countryGroup||'',bankReview:row.countryGroup?'reviewed':'pending'}:record;});const imported=next.bankImports.find(x=>x.id===id);if(imported.unresolvedRows?.length)throw Error('Є можливі повтори, які потрібно вибрати на екрані розподілу перед внесенням.');next.bankImports=next.bankImports.map(x=>x.id===id?{...x,reviewStage:'posted',approvedAt:at,reviewRequired:false}:x);assertClosedYearsUnchanged(data,next);return next;}
 
-root.SteuerraumFeatures={saveStatementPreview,commitStatementPreview,paymentArray,validatePaymentRecords,savePaymentRecord,removePaymentRecord,insuranceSummary,taxPaymentSummary,paymentCsv,applyPaymentStatement,inferBankPeriod,validateBankExclusions,incomeCountryGroups,validateIncomeRecords,incomeSummary,taxOverview,saveIncomeRecord,removeIncomeRecord,incomeCsv,BANK_REVIEW_CATEGORY,applyBankRows,resolveBankRow,validateAnnualDetails,saveAnnualDetails,validateBankImports,bankCoverage,annualSummaryCsv,completenessAudit,travelCostType,travelCity,suggestTrip,reopenYear,duplicateRecord,closedYear,validateClosedYears,assertClosedYearsUnchanged,closeYear,sameDocument,removeDocument,removeRecord,travelSelected,setTravelSelection,costTypes,validateTrips,tripTotals,travelSummary,documentGroups,documentDate,travelCsv};
+
+function allocationText(value){return String(value||'').normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}\d_]+/gu,' ').replace(/\s+/g,' ').trim();}
+function allocationSimilar(a,b){
+const merchant=allocationText(a.company),other=allocationText(b.company);
+if(merchant.length<4||merchant!==other)return false;
+if(/^(abrechnung karte|lastschrift|kartenzahlung|überweisung|sepa|bank|unknown|unbekannt)$/.test(merchant))return false;
+if(!/\b(amazon|paypal|ebay|sumup|stripe|square|apple|google|rewe|edeka|lidl|aldi|kaufland|dm|rossmann)\b/.test(merchant))return true;
+const stop=new Set(['sepa','lastschrift','zahlung','kartenzahlung','karte','iban','bic','ref','referenz','auftrag','eur','euro','de','com','www','amazon','paypal','ebay','sumup','stripe','apple','google','rewe','edeka','lidl','aldi','kaufland','rossmann']);
+const tokens=r=>new Set(allocationText(r.description).split(' ').filter(t=>t.length>=4&&!stop.has(t)));
+const x=tokens(a),y=tokens(b),common=[...x].filter(t=>y.has(t)).length;
+return x.size>=2&&y.size>=2&&common>=2&&common/new Set([...x,...y]).size>=0.8;
+}
+function allocationTeacher(row){return row.ledger==='expense'&&row.included!==false&&!row.matchId&&row.category&&row.category!==BANK_REVIEW_CATEGORY&&row.categorySelection!=='auto';}
+function suggestStatementCategories(rows,changedKey,category){
+if(!Array.isArray(rows))throw Error('Некоректний розподіл');
+let next=rows.map(r=>({...r})),changedIndex=changedKey?next.findIndex(r=>r.sourceKey===changedKey):-1;
+if(changedKey&&changedIndex<0)throw Error('Операцію не знайдено');
+if(changedIndex>=0){const row=next[changedIndex];if(row.ledger!=='expense'||row.matchId)throw Error('Статтю можна змінити лише для нової витрати');next[changedIndex]={...row,category,categorySelection:'manual',categorySuggestedBy:null};}
+for(let i=0;i<next.length;i++){
+const target=next[i];if(target.ledger!=='expense'||target.matchId||target.included===false||target.categorySelection==='manual')continue;
+const blank=!target.category||target.category===BANK_REVIEW_CATEGORY;
+const correctingAuto=changedIndex>=0&&i>changedIndex&&target.categorySelection==='auto'&&target.categorySuggestedBy===changedKey;
+if(!blank&&!correctingAuto)continue;
+const teachers=next.slice(0,i).filter(source=>allocationTeacher(source)&&allocationSimilar(source,target));
+const categories=new Set(teachers.map(source=>source.category));
+if(categories.size===1){const source=teachers.at(-1);next[i]={...target,category:source.category,categorySelection:'auto',categorySuggestedBy:source.sourceKey};}
+else if(correctingAuto)next[i]={...target,category:BANK_REVIEW_CATEGORY,categorySelection:null,categorySuggestedBy:null};
+}
+return next;
+}
+
+root.SteuerraumFeatures={suggestStatementCategories,allocationSimilar,saveStatementPreview,commitStatementPreview,paymentArray,validatePaymentRecords,savePaymentRecord,removePaymentRecord,insuranceSummary,taxPaymentSummary,paymentCsv,applyPaymentStatement,inferBankPeriod,validateBankExclusions,incomeCountryGroups,validateIncomeRecords,incomeSummary,taxOverview,saveIncomeRecord,removeIncomeRecord,incomeCsv,BANK_REVIEW_CATEGORY,applyBankRows,resolveBankRow,validateAnnualDetails,saveAnnualDetails,validateBankImports,bankCoverage,annualSummaryCsv,completenessAudit,travelCostType,travelCity,suggestTrip,reopenYear,duplicateRecord,closedYear,validateClosedYears,assertClosedYearsUnchanged,closeYear,sameDocument,removeDocument,removeRecord,travelSelected,setTravelSelection,costTypes,validateTrips,tripTotals,travelSummary,documentGroups,documentDate,travelCsv};
 })(globalThis);
