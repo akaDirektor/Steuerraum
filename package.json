@@ -1,0 +1,11 @@
+{
+  "name": "steuerraum",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@azure/msal-browser": "4.28.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

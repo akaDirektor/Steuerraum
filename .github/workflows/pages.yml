@@ -18,13 +18,22 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
+      - uses: actions/setup-node@v4
         with:
-          enablement: true
-      - name: Prepare public application
+          node-version: '22'
+      - name: Install Microsoft authentication library
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Check application syntax
+        run: |
+          node --check app.js
+          node --check cloud-entry.js
+          node --test tests/cloud.test.cjs
+      - uses: actions/configure-pages@v5
+      - name: Build public application
         run: |
           mkdir _site
           cp index.html style.css app.js icon.svg .nojekyll _site/
+          npx --no-install esbuild cloud-entry.js --bundle --format=iife --target=es2022 --minify --outfile=_site/cloud.js
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
