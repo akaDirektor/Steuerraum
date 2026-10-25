@@ -11,3 +11,5 @@ test('concurrent new records with the same identity conflict instead of forming 
 test('merge never mutates any of its inputs',()=>{const base=reg([r('a')]),local=reg([r('a',{amount:1500})]),remote=reg([r('a'),r('b')]);const before=JSON.stringify([base,local,remote]);merge(base,local,remote);assert.equal(JSON.stringify([base,local,remote]),before);});
 
 test('legacy cloud enrichment is preserved without presenting false category conflicts',()=>{const local={...reg([r('a')]),categories:[{name:'Example'}]},remote={...reg([r('a',{invoiceNumber:'EXAMPLE-1'})]),categories:[{name:'Example',target:1000}]};const result=merge(null,local,remote);assert.equal(result.conflicts.length,0);assert.equal(result.data.records[0].invoiceNumber,'EXAMPLE-1');assert.equal(result.data.categories[0].target,1000);});
+
+test('independent bank statement uploads merge by import identity',()=>{const base={...reg([]),bankImports:[]},local={...base,bankImports:[{id:'one',status:'queued'}]},remote={...base,bankImports:[{id:'two',status:'queued'}]};const result=merge(base,local,remote);assert.equal(result.conflicts.length,0);assert.equal(result.data.bankImports.length,2);});
