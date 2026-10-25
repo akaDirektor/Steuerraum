@@ -30,13 +30,14 @@ jobs:
           node --check sync-core.js
           node --check features.js
           node --check tax-estimate.js
+          node --check obligation-planning.js
           node --check bank-parser.js
           node --test tests/*.test.cjs
       - uses: actions/configure-pages@v5
       - name: Build public application
         run: |
           mkdir _site
-          cp index.html style.css app.js features.js tax-estimate.js bank-parser.js icon.svg .nojekyll _site/
+          cp index.html style.css app.js features.js tax-estimate.js obligation-planning.js bank-parser.js icon.svg .nojekyll _site/
           npx --no-install esbuild cloud-entry.js --bundle --format=iife --target=es2022 --minify --outfile=_site/cloud.js
       - uses: actions/upload-pages-artifact@v3
         with:
