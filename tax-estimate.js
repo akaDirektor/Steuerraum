@@ -13,6 +13,17 @@ function soliTax(estCents,year){const p=tariffs[year];if(!p)throw Error('Рік 
 function getSettings(data,year){const saved=data.taxEstimateSettings?.[year]||{};return {insuranceDeductionCents:0,otherDeductionsCents:0,otherIncomeCents:0,tradeAdjustmentCents:0,...saved};}
 function validateSettings(input){const result={};for(const field of ['insuranceDeductionCents','otherDeductionsCents','otherIncomeCents','tradeAdjustmentCents'])result[field]=cents(input[field]??0,field,field==='tradeAdjustmentCents');if(input.hebOverride!=null){if(!Number.isFinite(input.hebOverride)||input.hebOverride<200||input.hebOverride>1000)throw Error('Hebesatz має бути від 200 до 1000%');result.hebOverride=input.hebOverride;}return result;}
 function saveSettings(data,year,input){if(!tariffs[year])throw Error('Рік не підтримується');if(root.SteuerraumFeatures?.closedYear(data,year))throw Error('Рік закритий');return {...data,taxEstimateSettings:{...(data.taxEstimateSettings||{}),[year]:validateSettings(input)}};}
+
+function paymentBalance(data,year,estimates){
+const byType={};for(const taxType of ['Einkommensteuer','Gewerbesteuer']){
+const rows=(data.taxPaymentRecords||[]).filter(r=>String(r.taxYear)===String(year)&&r.taxType===taxType&&['advance','assessment','refund'].includes(r.kind)),sum=kind=>rows.filter(r=>r.kind===kind).reduce((s,r)=>s+cents(r.amount,'сплачений податок'),0),advance=sum('advance'),assessment=sum('assessment'),refund=sum('refund'),netPaid=advance+assessment-refund,estimated=cents(estimates[taxType],'орієнтовний податок'),balance=estimated-netPaid;
+byType[taxType]={estimated,advance,assessment,refund,netPaid,balance,status:balance>0?'due':balance<0?'overpaid':'balanced',amount:Math.abs(balance),recordIds:rows.map(r=>r.id)};
+}
+const total={};for(const field of ['estimated','advance','assessment','refund','netPaid','balance'])total[field]=Object.values(byType).reduce((s,r)=>s+r[field],0);total.status=total.balance>0?'due':total.balance<0?'overpaid':'balanced';total.amount=Math.abs(total.balance);
+const unassigned=(data.taxPaymentRecords||[]).filter(r=>(String(r.taxYear)===String(year)||!r.taxYear&&r.date.startsWith(String(year)))&&(!r.taxYear||!['Einkommensteuer','Gewerbesteuer'].includes(r.taxType)||!['advance','assessment','refund'].includes(r.kind)));
+return {byType,total,unassignedCount:unassigned.length};
+}
+
 function estimate(data,year){
 const rule=tariffs[year];if(!rule)return {ready:false,reason:'Для '+year+' року податкові ставки ще не перевірені.'};
 const profile=data.taxEstimateProfile;if(!profile||profile.assessment!=='single'||profile.churchRate!==0)return {ready:false,reason:'Потрібні підтверджені параметри: індивідуальна декларація та Kirchensteuer 0%.'};
@@ -20,9 +31,8 @@ const municipality=municipalities[profile.municipality];const settings=validateS
 const rows=(data.incomeRecords||[]).filter(r=>r.date.startsWith(String(year)));if(!rows.length)return {ready:false,reason:'Додай доходи за вибраний рік для розрахунку.'};
 const income=rows.reduce((sum,r)=>sum+cents(r.amount,'дохід'),0),expenses=(data.records||[]).filter(r=>r.date.startsWith(String(year))).reduce((sum,r)=>sum+cents(r.amount,'витрати'),0),profit=income-expenses,personalDeductions=settings.insuranceDeductionCents+settings.otherDeductionsCents,estimatedZve=Math.max(0,profit+settings.otherIncomeCents-personalDeductions),tariff=tariffTax(estimatedZve,year);
 const tradeErtrag=Math.max(0,profit+settings.tradeAdjustmentCents),roundedTrade=Math.floor(tradeErtrag/10000)*10000,tradeBase=profile.trade===false?0:Math.max(0,roundedTrade-2450000),messbetrag=Math.round(tradeBase*35/1000),gewerbe=Math.round(messbetrag*(heb||0)/100),positiveBusiness=Math.max(0,profit),positiveTotal=positiveBusiness+settings.otherIncomeCents,creditCap=positiveTotal>0?Math.floor(tariff*positiveBusiness/positiveTotal):0,credit=Math.min(4*messbetrag,gewerbe,creditCap),incomeTax=Math.max(0,tariff-credit),soli=soliTax(incomeTax,year),totalTax=gewerbe+incomeTax+soli,combinedBeforeTax=profit+settings.otherIncomeCents,remaining=combinedBeforeTax-totalTax;
-const attributable=(data.taxPaymentRecords||[]).filter(r=>r.taxYear===String(year)),paid={Einkommensteuer:0,Gewerbesteuer:0};for(const r of attributable)if(r.taxType in paid&&['advance','assessment','refund'].includes(r.kind))paid[r.taxType]+=r.kind==='refund'?-r.amount:r.amount;
-const unassignedPayments=(data.taxPaymentRecords||[]).filter(r=>(r.taxYear===String(year)||!r.taxYear&&r.date.startsWith(String(year)))&&(!r.taxYear||!['Einkommensteuer','Gewerbesteuer'].includes(r.taxType)||r.kind==='unknown')).length;
-return {ready:true,year:String(year),settings,municipality:municipality?.name||'Ручний Hebesatz',heb,rule,income,expenses,profit,personalDeductions,estimatedZve,tariff,tradeErtrag,roundedTrade,tradeBase,messbetrag,gewerbe,creditCap,credit,incomeTax,soli,totalTax,combinedBeforeTax,remaining,effectiveRate:combinedBeforeTax>0?totalTax/combinedBeforeTax:0,paid,estBalance:incomeTax-paid.Einkommensteuer,tradeBalance:gewerbe-paid.Gewerbesteuer,unassignedPayments};
+const settlement=paymentBalance(data,year,{Einkommensteuer:incomeTax,Gewerbesteuer:gewerbe}),paid={Einkommensteuer:settlement.byType.Einkommensteuer.netPaid,Gewerbesteuer:settlement.byType.Gewerbesteuer.netPaid},unassignedPayments=settlement.unassignedCount;
+return {ready:true,year:String(year),settings,municipality:municipality?.name||'Ручний Hebesatz',heb,rule,income,expenses,profit,personalDeductions,estimatedZve,tariff,tradeErtrag,roundedTrade,tradeBase,messbetrag,gewerbe,creditCap,credit,incomeTax,soli,totalTax,combinedBeforeTax,remaining,effectiveRate:combinedBeforeTax>0?totalTax/combinedBeforeTax:0,paid,settlement,estBalance:incomeTax-paid.Einkommensteuer,tradeBalance:gewerbe-paid.Gewerbesteuer,unassignedPayments};
 }
-root.SteuerraumTax={tariffs,municipalities,tariffTax,soliTax,getSettings,validateSettings,saveSettings,estimate};
+root.SteuerraumTax={paymentBalance,tariffs,municipalities,tariffTax,soliTax,getSettings,validateSettings,saveSettings,estimate};
 })(globalThis);
