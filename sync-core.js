@@ -2,7 +2,7 @@
 export function stable(value){if(value===undefined)return 'undefined';if(Array.isArray(value))return '['+value.map(stable).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+stable(value[k])).join(',')+'}';return JSON.stringify(value);}
 function equal(a,b){return stable(a)===stable(b);}
 function object(value){return value!==null&&typeof value==='object'&&!Array.isArray(value);}
-const keyed={records:'id',trips:'id',categories:'name',links:'url',previewRows:'sourceKey',bankImports:'id',incomeRecords:'id',insuranceRecords:'id',taxPaymentRecords:'id'};
+const keyed={inboxProcessingLog:'id',records:'id',trips:'id',categories:'name',links:'url',previewRows:'sourceKey',bankImports:'id',incomeRecords:'id',insuranceRecords:'id',taxPaymentRecords:'id'};
 export function mergeRegisters(base,local,remote,choices={}){
 const conflicts=[];const legacy=base===null;
 function conflict(path,l,r){const key=JSON.stringify(path);if(choices[key]==='local')return l;if(choices[key]==='remote')return r;conflicts.push({key,path,local:l,remote:r});return r;}
