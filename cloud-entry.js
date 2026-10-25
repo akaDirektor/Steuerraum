@@ -6,6 +6,7 @@ let initializing=true,authReady=false,needsReauth=false,syncError=false,activity
 const el=id=>document.getElementById(id);
 function status(text,error=false){syncError=error;el('cloudStatus').textContent=text;el('cloudStatus').className=error?'cloudError':'';controls();}
 function controls(){
+const alert=el('cloudAlert');alert.hidden=!syncError;alert.textContent=syncError?el('cloudStatus').textContent:'';
 const identity=el('cloudIdentity'),indicator=el('cloudSync'),storage=el('storage'),time=el('cloudTimestamp');
 const accountName=cloudAccount?.username||cloudAccount?.name||'робочий акаунт';
 identity.textContent=initializing?'Перевіряємо вхід Microsoft…':needsReauth?'Потрібен повторний вхід · '+accountName:authReady?'✓ Ви увійшли · '+accountName:cloudAccount?'Перевіряємо доступ · '+accountName:'Ви не увійшли в Microsoft';
