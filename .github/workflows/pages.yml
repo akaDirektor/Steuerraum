@@ -27,6 +27,7 @@ jobs:
         run: |
           node --check app.js
           node --check cloud-entry.js
+          node --check sync-core.js
           node --check features.js
           node --test tests/*.test.cjs
       - uses: actions/configure-pages@v5

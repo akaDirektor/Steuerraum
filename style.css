@@ -25,3 +25,5 @@
 @media(max-width:900px){.workspaceHeader .breadcrumb{display:none}.cloudCompact{width:100%}.cloudCompact>.syncBadge{margin-right:auto;font-size:11px}.workspaceHeader{min-height:52px}.utilityPopover{width:330px}}
 @media(max-width:520px){.cloudCompact{gap:7px;flex-wrap:wrap}.cloudCompact>.syncBadge{flex:1 1 160px}.cloudCompact>button,.utilityMenu>summary{padding:7px 9px}}
 @media print{.utilityMenu,.cloudAlert{display:none!important}}
+
+#syncConflict{width:850px;max-width:95vw}.syncConflictItem{padding:18px 0;border-top:1px solid #dde7e0}.syncConflictItem h3{font-size:15px;margin:0 0 12px}.syncConflictItem p{font-size:13px;overflow-wrap:anywhere}.syncConflictItem select{width:100%}#syncResolutionError{color:#a32929}#syncReview{margin-top:12px}
