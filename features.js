@@ -23,5 +23,8 @@ function sameDocument(a,b){return !!(a.driveItemId&&b.driveItemId&&a.driveItemId
 function removeDocument(data,link){const next={...data,records:data.records.map(r=>({...r,links:(r.links||[]).filter(l=>!sameDocument(l,link))}))};assertClosedYearsUnchanged(data,next);return next;}
 function removeRecord(data,id){if(!data.records.some(r=>r.id===id))throw Error('Операцію не знайдено');const next={...data,records:data.records.filter(r=>r.id!==id),trips:(data.trips||[]).map(t=>({...t,costs:Object.fromEntries(costTypes.map(k=>[k,t.costs[k].filter(ref=>ref!==id)]))}))};assertClosedYearsUnchanged(data,next);return next;}
 
-root.SteuerraumFeatures={closedYear,validateClosedYears,assertClosedYearsUnchanged,closeYear,sameDocument,removeDocument,removeRecord,travelSelected,setTravelSelection,costTypes,validateTrips,tripTotals,travelSummary,documentGroups,documentDate,travelCsv};
+
+function duplicateRecord(data,id,newId){const record=data.records.find(r=>r.id===id);if(!record)throw Error('Операцію не знайдено');if(closedYear(data,record.date.slice(0,4)))throw Error('Рік закритий. Дублювання недоступне.');if(typeof newId!=='string'||!newId||data.records.some(r=>r.id===newId))throw Error('Потрібен новий ідентифікатор операції');return {...JSON.parse(JSON.stringify(record)),id:newId,duplicateOf:id};}
+
+root.SteuerraumFeatures={duplicateRecord,closedYear,validateClosedYears,assertClosedYearsUnchanged,closeYear,sameDocument,removeDocument,removeRecord,travelSelected,setTravelSelection,costTypes,validateTrips,tripTotals,travelSummary,documentGroups,documentDate,travelCsv};
 })(globalThis);
