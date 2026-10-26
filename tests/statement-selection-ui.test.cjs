@@ -19,3 +19,14 @@ const first=checkboxes()[0];first.checked=false;first.onchange();assert.equal(c.
 node('#statementCompany').oninput({target:{value:'Other'}});assert.equal(node('#statementCommit').disabled,true);
 node('#statementResetFilters').onclick();assert.equal(node('#statementCommit').disabled,false);assert.ok(node('#statementPreviewRows').innerHTML.includes('<b>Other</b>'));assert.equal(c.activeStatement().selectedSourceKeys.length,1);
 });
+
+test('clear all, filter counterparty, select all shown and confirm posts only the selected counterparty',()=>{
+const {c,node}=setup();node('#statementSelectNone').onclick();assert.equal(c.activeStatement().selectedSourceKeys.length,0);assert.equal(node('#statementCommit').disabled,true);
+node('#statementCompany').oninput({target:{value:'Target'}});node('#statementSelectAllShown').onclick();assert.equal(c.activeStatement().selectedSourceKeys.length,2);assert.equal(node('#statementCommit').disabled,false);
+node('#statementCommit').onclick();assert.equal(vm.runInContext('data.records.length',c),2);assert.equal(vm.runInContext('data.records.every(r=>r.company==="Target")',c),true);assert.equal(vm.runInContext('Object.keys(data.bankExclusions).length',c),0);
+});
+test('select all shown adds visible rows while preserving a previous selection and empty results disable it',()=>{
+const {c,node}=setup();node('#statementSelectNone').onclick();node('#statementCompany').oninput({target:{value:'Target'}});node('#statementSelectAllShown').onclick();node('#statementCompany').oninput({target:{value:'Other'}});node('#statementSelectAllShown').onclick();assert.equal(c.activeStatement().selectedSourceKeys.length,3);
+node('#statementCompany').oninput({target:{value:'No results'}});assert.equal(node('#statementSelectAllShown').disabled,true);
+node('#statementResetFilters').onclick();assert.equal(node('#statementCommit').disabled,false);
+});
