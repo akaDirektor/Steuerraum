@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install Microsoft authentication library
+      - name: Install application dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
       - name: Check application syntax
         run: |
@@ -32,6 +32,8 @@ jobs:
           node --check tax-estimate.js
           node --check obligation-planning.js
           node --check bank-parser.js
+          node --check accountant-report.js
+          node --check accountant-entry.js
           node --test tests/*.test.cjs
       - uses: actions/configure-pages@v5
       - name: Build public application
@@ -39,6 +41,7 @@ jobs:
           mkdir _site
           cp index.html style.css app.js features.js tax-estimate.js obligation-planning.js bank-parser.js icon.svg icon-32.png icon-180.png icon-192.png icon-512.png manifest.webmanifest .nojekyll _site/
           npx --no-install esbuild cloud-entry.js --bundle --format=iife --target=es2022 --minify --outfile=_site/cloud.js
+          npx --no-install esbuild accountant-entry.js --bundle --platform=browser --format=iife --target=es2022 --minify --outfile=_site/accountant-export.js
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
