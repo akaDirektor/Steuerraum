@@ -24,3 +24,9 @@ assert.equal(form.elements.hasChildren.checked,true);assert.equal(form.elements.
 form.elements.hasChildren.checked=false;form.onsubmit({preventDefault(){}});assert.equal(vm.runInContext("data.insuranceProjectionProfiles['2026'].hasChildren",c),true);assert.equal(node('#insuranceProjectionError').textContent,undefined);
 form.elements.childrenUnder25.value='0';form.elements.childrenUnder25.oninput();assert.equal(node('#insuranceAdultChildren').hidden,false);assert.equal(form.elements.hasChildren.disabled,false);
 });
+
+test('tax screen shows payment-based insurance estimate and switches its source to the certificate',()=>{
+const {c}=setup();c.fixture.insuranceRecords=[{id:'paid',date:'2026-01-01',reportYear:'2026',direction:'debit',amount:200000}];
+let html=c.taxEstimatePanel();assert.ok(html.includes('Страхування · Basis/Pflege'));assert.ok(html.includes('Попередня оцінка за платежами мінус повернення'));assert.ok(html.includes('Автоматично: платежі → довідка TK'));assert.ok(html.includes('name="insuranceDeductionCents" value="2000.00" disabled'));
+c.fixture.annualObligations=[{id:'certificate',year:'2026',type:'Krankenversicherung',amount:220000,deductibleAmount:190000}];html=c.taxEstimatePanel();assert.ok(html.includes('За довідкою TK · Basis/Pflege'));assert.ok(html.includes('name="insuranceDeductionCents" value="1900.00" disabled'));
+});
