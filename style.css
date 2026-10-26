@@ -64,3 +64,15 @@
 .balanceCard.balance-due span,.balanceCard.balance-due b{color:#b42318}
 .balanceCard.balance-overpaid span,.balanceCard.balance-overpaid b{color:#26775c}
 .balanceCard.balance-neutral span,.balanceCard.balance-neutral b{color:#55616b}
+
+/* Compact import sections retain native keyboard-accessible disclosure behavior. */
+.importFold>summary{display:flex;align-items:center;gap:12px;cursor:pointer;list-style:none;min-height:52px;font-size:18px;font-weight:650}
+.importFold>summary::-webkit-details-marker{display:none}
+.importFold>summary::before{content:'▸';color:#26775c;flex-shrink:0}
+.importFold[open]>summary::before{content:'▾'}
+.importFold>summary small{margin:0 0 0 auto;font-size:12px;font-weight:400;text-align:right}
+.importFold>summary:focus-visible{outline:2px solid #26775c;outline-offset:4px;border-radius:4px}
+.importFoldBody{padding-top:8px}
+#imports .importFold{min-width:0}
+#bankAllocationSection:not([open]){padding-bottom:0}
+#invoiceAttachmentPanel:has(>.importFold:not([open])){padding-bottom:0}
