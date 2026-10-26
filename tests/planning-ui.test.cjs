@@ -30,3 +30,10 @@ const {c}=setup();c.fixture.insuranceRecords=[{id:'paid',date:'2026-01-01',repor
 let html=c.taxEstimatePanel();assert.ok(html.includes('Страхування · Basis/Pflege'));assert.ok(html.includes('Попередня оцінка за платежами мінус повернення'));assert.ok(html.includes('Автоматично: платежі → довідка TK'));assert.ok(html.includes('name="insuranceDeductionCents" value="2000.00" disabled'));
 c.fixture.annualObligations=[{id:'certificate',year:'2026',type:'Krankenversicherung',amount:220000,deductibleAmount:190000}];html=c.taxEstimatePanel();assert.ok(html.includes('За довідкою TK · Basis/Pflege'));assert.ok(html.includes('name="insuranceDeductionCents" value="1900.00" disabled'));
 });
+
+test('year overview contains editable commute days and live totals without creating expense records',()=>{
+const {c,node}=setup();c.fixture.annualDetails={'2026':{distanceKm:25.9,commuteDays:100}};c.localStorage.setItem=()=>{};c.render=()=>{};
+const html=c.annualDetailsPanel();assert.ok(html.includes('Доїзд до офісу · Entfernungspauschale'));assert.ok(html.includes('name="commuteDays"'));assert.ok(html.includes('950,00'));assert.ok(html.includes('в один бік'));
+const form=node('#annualDetailsForm');form.elements={distanceKm:{value:'25.9'},commuteDays:{value:'120'},commuteOwnCar:{checked:false},homeAddress:{value:''},officeAddress:{value:''}};c.bindAnnualDetails();form.elements.commuteDays.oninput();assert.ok(node('#commuteSummary').textContent.includes('1.140,00'));assert.equal(c.fixture.records.length,0);form.onsubmit({preventDefault(){}});assert.equal(vm.runInContext("data.annualDetails['2026'].commuteDays",c),120);assert.equal(vm.runInContext('data.records.length',c),0);
+const taxHtml=c.taxEstimatePanel();assert.ok(taxHtml.includes('Доїзд до офісу · Entfernungspauschale'));assert.ok(taxHtml.includes('Прибуток після врахування доїзду'));
+});
