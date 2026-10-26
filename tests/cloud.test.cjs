@@ -85,3 +85,44 @@ test('notice PDF uploads only private source and review queue, without creating 
 test('a removed draft does not prevent uploading the same file again',async()=>{let remote={...reg([]),bankImports:[{id:'removed',year:'2024',status:'cancelled',sourceHash:'01'.repeat(32),importScope:'all',uploadedAt:'2024-01-01T00:00:00Z',periodFrom:null,coveredThrough:null}]},tag='v1';const {ctx}=setup(async(url,options={})=>{const result=value=>({ok:true,json:async()=>clone(value)});if(url.startsWith('https://download.example/'))return result(remote);if(url.includes('/INBOX:/children'))return result({value:[]});if(url.endsWith('/INBOX'))return result({id:'inbox'});if(options.method==='PUT'&&url.includes('/items/inbox:'))return result({id:'new-source',webUrl:'https://example.org/statement'});if(options.method==='PUT'&&url.endsWith('/items/file/content')){remote=JSON.parse(options.body);tag+='n';return result({id:'file',eTag:tag});}return result({id:'file',eTag:tag,size:100,'@microsoft.graph.downloadUrl':'https://download.example/register'});});ctx.crypto.subtle={digest:async()=>new Uint8Array(32).fill(1).buffer};const result=await ctx.window.uploadSteuerraumBank({name:'example.xlsx',size:10,type:'application/octet-stream',arrayBuffer:async()=>new ArrayBuffer(10)},{unassigned:true,scope:'all'});assert.equal(result.duplicate,false);assert.equal(remote.bankImports.length,2);assert.equal(remote.bankImports[0].status,'cancelled');assert.equal(remote.bankImports[1].status,'queued');assert.equal(remote.records.length,0);});
 
 test('a partially posted statement allows a fresh allocation of the same file without posting financial rows',async()=>{let remote={...reg([]),bankImports:[{id:'removed',year:'2024',status:'completed',selectedSourceKeys:[],previewRows:[{sourceKey:'a'.repeat(64),direction:'debit',ledger:'expense'}],sourceHash:'01'.repeat(32),importScope:'all',uploadedAt:'2024-01-01T00:00:00Z',periodFrom:'2024-01-01',coveredThrough:'2024-12-31'}]},tag='v1';const {ctx}=setup(async(url,options={})=>{const result=value=>({ok:true,json:async()=>clone(value)});if(url.startsWith('https://download.example/'))return result(remote);if(url.includes('/INBOX:/children'))return result({value:[]});if(url.endsWith('/INBOX'))return result({id:'inbox'});if(options.method==='PUT'&&url.includes('/items/inbox:'))return result({id:'new-source',webUrl:'https://example.org/statement'});if(options.method==='PUT'&&url.endsWith('/items/file/content')){remote=JSON.parse(options.body);tag+='n';return result({id:'file',eTag:tag});}return result({id:'file',eTag:tag,size:100,'@microsoft.graph.downloadUrl':'https://download.example/register'});});ctx.crypto.subtle={digest:async()=>new Uint8Array(32).fill(1).buffer};const result=await ctx.window.uploadSteuerraumBank({name:'example.xlsx',size:10,type:'application/octet-stream',arrayBuffer:async()=>new ArrayBuffer(10)},{unassigned:true,scope:'all'});assert.equal(result.duplicate,false);assert.equal(remote.bankImports.length,2);assert.equal(remote.bankImports[0].status,'completed');assert.equal(remote.bankImports[1].status,'queued');assert.equal(remote.records.length,0);});
+
+function attachmentScenario(){
+const income={id:'payment',date:'2026-01-20',company:'Example Services',description:'Invoice A1',amount:12300,countryCode:'DE',countryGroup:'Deutschland',links:[]};
+const item={id:'attachment-doc',ledger:'income',status:'matched',recordId:'payment',fileItemId:'doc',fileName:'Example.pdf',fileHash:'quickxor:synthetic',fileSize:12,documentUrl:'https://example.sharepoint.com/sites/test/_layouts/15/Doc.aspx?sourcedoc=%7B11111111-1111-1111-1111-111111111111%7D',invoice:{number:'A1',date:'2026-01-10',amount:12300,countryCode:'DE'},expected:{date:income.date,company:income.company,description:income.description,amount:income.amount,countryCode:'DE'}};
+const batch={version:1,id:'batch',items:[item]},s=server({...reg([]),incomeRecords:[income]});s.moves=0;s.badHash=false;const original=s.fetch;
+s.fetch=async(url,options={})=>{
+const response=(value,status=200)=>({ok:status<400,status,json:async()=>clone(value)});
+if(url.endsWith('/invoice-attachments.json'))return response({size:100,'@microsoft.graph.downloadUrl':'https://download.example/attachments'});
+if(url==='https://download.example/attachments')return response(batch);
+if(url.includes('/items/doc?')&&url.includes('sharepointIds'))return response({id:'doc',name:'Example.pdf',size:12,file:{hashes:{quickXorHash:s.badHash?'changed':'synthetic'}},sharepointIds:{siteUrl:'https://example.sharepoint.com/sites/test',listItemUniqueId:'11111111-1111-1111-1111-111111111111'}});
+if(url.endsWith('/items/doc')&&options.method==='PATCH'){assert.equal(s.remote.incomeRecords[0].links.length,1);assert.equal(s.remote.inboxProcessingLog[0].status,'attached');s.moves++;return response({id:'doc'});}
+if(url.includes('/items/doc?')&&url.includes('parentReference'))return response({id:'doc',parentReference:{id:'month'}});
+if(url.endsWith('/me/drive/root:/private/folder'))return response({id:'root'});
+if(url.includes('/items/root/children'))return response({value:[{id:'year',name:'2026',folder:{}}]});
+if(url.includes('/items/year/children'))return response({value:[{id:'kind',name:'Інвойси',folder:{}}]});
+if(url.includes('/items/kind/children'))return response({value:[{id:'month',name:'01',folder:{}}]});
+return original(url,options);
+};const env=setup(s.fetch);return {...env,s,batch};
+}
+test('invoice attachments use recovery, conditional registry writes and verified journal before monthly archive; repeat does not duplicate income',async()=>{
+const {ctx,s}=attachmentScenario();const result=await ctx.window.applySteuerraumInvoiceAttachments();assert.equal(result.warning,false);assert.equal(s.remote.incomeRecords.length,1);assert.equal(s.remote.incomeRecords[0].links.length,1);assert.equal(s.backups.length,1);assert.equal(s.moves,1);assert.ok(s.calls.filter(c=>c.options.method==='PUT'&&c.url.endsWith('/items/file/content')).every(c=>c.options.headers['If-Match']));
+await ctx.window.applySteuerraumInvoiceAttachments();assert.equal(s.remote.incomeRecords.length,1);assert.equal(s.remote.incomeRecords[0].links.length,1);assert.equal(s.remote.inboxProcessingLog.length,1);
+});
+test('changed document, failed backup or failed register save never archive files or claim a confirmed attachment',async()=>{
+for(const flag of ['badHash','failBackup','failPut']){const {ctx,s}=attachmentScenario();s[flag]=true;await assert.rejects(ctx.window.applySteuerraumInvoiceAttachments());assert.equal(s.moves,0);assert.equal(s.remote.incomeRecords[0].links.length,0);assert.ok(!s.remote.inboxProcessingLog?.some(l=>l.status==='attached'));}
+});
+
+test('expense archive converts existing paths to stable file links before moving month folders and leaves private unrelated links alone',async()=>{
+const {ctx,s}=attachmentScenario(),old='https://example.sharepoint.com/sites/test/Documents/private/folder/2025/01%20%E2%80%94%20January/expense.pdf';
+s.remote.records=[{...row('expense'),date:'2025-01-20',links:[{name:'Expense.pdf',url:old}]}];
+const original=ctx.fetch;ctx.fetch=async(url,options={})=>{
+const reply=value=>({ok:true,json:async()=>clone(value)});
+if(url.includes('expense.pdf?'))return reply({id:'expense-doc',file:{},sharepointIds:{siteUrl:'https://example.sharepoint.com/sites/test',listItemUniqueId:'22222222-2222-2222-2222-222222222222'}});
+if(url.includes('/items/root/children'))return reply({value:[{id:'year-old',name:'2025',folder:{}},{id:'year',name:'2026',folder:{}}]});
+if(url.includes('/items/year-old/children'))return reply({value:[{id:'old-month',name:'01 — January',folder:{}},{id:'receipts',name:'Рахунки',folder:{}}]});
+if(url.endsWith('/items/old-month')&&options.method==='PATCH'){assert.ok(s.remote.records[0].links[0].url.includes('Doc.aspx'));assert.equal(s.remote.records[0].links[0].driveItemId,'expense-doc');s.monthMoved=true;return reply({id:'old-month'});}
+if(url.includes('/items/old-month?'))return reply({parentReference:{id:'receipts'}});
+return original(url,options);
+};
+const result=await ctx.window.applySteuerraumInvoiceAttachments();assert.equal(result.warning,false);assert.equal(s.monthMoved,true);assert.equal(s.remote.records[0].amount,1000);assert.equal(s.remote.records[0].links.length,1);assert.ok(s.remote.records[0].links[0].url.includes('22222222'));assert.equal(ctx.expenseArchivePath('https://public.example/unrelated.pdf'),null);
+});

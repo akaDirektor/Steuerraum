@@ -246,5 +246,44 @@ function setStatementImportScope(data,id,scope){if(!['all','income','expenses'].
 
 function cancelStatementDraft(data,id,at=new Date().toISOString()){const entry=(data.bankImports||[]).find(r=>r.id===id);if(!entry)throw Error('Завантаження не знайдено');if(entry.status==='completed')throw Error('Цю виписку вже внесено. Для неї використовуй скасування імпорту.');if(entry.status==='cancelled')return data;if(closedYear(data,entry.year))throw Error('Рік закритий. Спочатку відкрий його для редагування.');const next={...data,bankImports:data.bankImports.map(r=>r.id===id?{...r,status:'cancelled',reviewStage:'cancelled',reviewRequired:false,cancelledAt:at,previewRows:[],unresolvedRows:[]}:r)};assertClosedYearsUnchanged(data,next);return next;}
 
-root.SteuerraumFeatures={suggestStatementCountries,incomeCountries,incomeCountryName,incomeCountryGroup,withIncomeCountry,setIncomeCountries,requireStatementIncomeCountry,commuteAllowance,statementHasDeferredRows,filterStatementRows,statementRowSelected,statementSelectionRows,selectStatementRows,cancelStatementDraft,statementScopeAllows,setStatementImportScope,planStatementUndo,undoStatementImport,suggestStatementCategories,allocationSimilar,saveStatementPreview,commitStatementPreview,paymentArray,validatePaymentRecords,savePaymentRecord,removePaymentRecord,insuranceSummary,taxPaymentSummary,paymentCsv,applyPaymentStatement,inferBankPeriod,validateBankExclusions,incomeCountryGroups,validateIncomeRecords,incomeSummary,taxOverview,saveIncomeRecord,removeIncomeRecord,incomeCsv,BANK_REVIEW_CATEGORY,applyBankRows,resolveBankRow,validateAnnualDetails,saveAnnualDetails,validateBankImports,bankCoverage,annualSummaryCsv,completenessAudit,travelCostType,travelCity,suggestTrip,reopenYear,duplicateRecord,closedYear,validateClosedYears,assertClosedYearsUnchanged,closeYear,sameDocument,removeDocument,removeRecord,travelSelected,setTravelSelection,costTypes,validateTrips,tripTotals,travelSummary,documentGroups,documentDate,travelCsv};
+
+function invoiceAttachmentPlan(data,batch){
+if(batch?.version!==1||!Array.isArray(batch.items)||batch.items.length>500)throw Error('Некоректний пакет прив’язок');
+const ids=new Set();
+return batch.items.map(item=>{
+if(!item||typeof item.id!=='string'||ids.has(item.id)||item.ledger!=='income'||typeof item.fileItemId!=='string'||typeof item.fileName!=='string')throw Error('Некоректна або повторна прив’язка');ids.add(item.id);
+const record=(data.incomeRecords||[]).find(r=>r.id===item.recordId),log=(data.inboxProcessingLog||[]).find(r=>r.id===item.id);
+let state='needs_review',message=item.message||'Потрібна перевірка';
+if(['attached','duplicate'].includes(log?.status))return {item,record,state:'done',message:'Уже прикріплено'};
+if(item.status!=='matched')return {item,record,state,message};
+const expected=item.expected,invoice=item.invoice;
+let url;try{url=new URL(item.documentUrl);}catch{}
+if(!url||url.protocol!=='https:'||!url.hostname.endsWith('.sharepoint.com')||url.username||url.password||!invoice||!validDate(invoice.date)||!incomeCountryCodes.includes(invoice.countryCode)||!Number.isSafeInteger(invoice.amount)||invoice.amount<=0)return {item,record,state,message:'Перевір дату, суму, країну та приватне посилання інвойсу'};
+if(!record)return {item,record,state,message:'Платіж не знайдено або його видалено'};
+if(closedYear(data,record.date.slice(0,4))||closedYear(data,invoice.date.slice(0,4)))return {item,record,state,message:'Рік закритий'};
+if(!expected||record.amount!==expected.amount||record.date!==expected.date||record.company!==expected.company||record.description!==expected.description||String(record.countryCode||'')!==String(expected.countryCode||''))return {item,record,state,message:'Платіж змінено після зіставлення; перевір прив’язку'};
+if(record.amount!==invoice.amount)return {item,record,state,message:'Сума платежу та інвойсу відрізняється'};
+if(record.countryCode&&record.countryCode!==invoice.countryCode)return {item,record,state,message:'Країна інвойсу відрізняється від країни платежу'};
+if(record.invoiceNumber&&String(record.invoiceNumber)!==String(invoice.number))return {item,record,state,message:'У платежу вже є інший номер інвойсу'};
+const duplicate=(record.links||[]).some(l=>l.driveItemId===item.fileItemId||l.url===item.documentUrl||l.sourceHash===item.fileHash);
+return {item,record,state:duplicate?'linked':'ready',message:duplicate?'Файл уже є у платежі':'Сума, контрагент і країна звірені'};
+});
+}
+function applyInvoiceAttachments(data,batch,at=new Date().toISOString()){
+const plan=invoiceAttachmentPlan(data,batch),byId=new Map(plan.filter(p=>p.state==='ready').map(p=>[p.record.id,p]));
+if(byId.size!==plan.filter(p=>p.state==='ready').length)throw Error('Кілька різних інвойсів претендують на один платіж');
+const incomeRecords=(data.incomeRecords||[]).map(record=>{
+const p=byId.get(record.id);if(!p)return record;const {item}=p;
+return {...record,invoiceNumber:record.invoiceNumber||item.invoice.number,links:[...(record.links||[]),{name:item.fileName,url:item.documentUrl,driveItemId:item.fileItemId,sourceHash:item.fileHash,documentDate:item.invoice.date,invoiceNumber:item.invoice.number,countryCode:item.invoice.countryCode}]};
+});
+const log=new Map((data.inboxProcessingLog||[]).map(r=>[r.id,r]));
+for(const p of plan){if(p.state==='done')continue;log.set(p.item.id,{...log.get(p.item.id),id:p.item.id,sourcePackageId:batch.id,sourceHash:p.item.fileHash||'',processedAt:at,fileName:p.item.fileName,documentUrl:p.item.documentUrl,status:'needs_review',recordId:p.record?.id||null,ledger:'income',message:['ready','linked'].includes(p.state)?'Прив’язка очікує підтвердження збереження в OneDrive':p.message});}
+const next={...data,incomeRecords,inboxProcessingLog:[...log.values()]};assertClosedYearsUnchanged(data,next);return next;
+}
+function confirmInvoiceAttachments(data,batch,at=new Date().toISOString()){
+const plan=invoiceAttachmentPlan(data,batch),confirmed=new Set(plan.filter(p=>p.state==='linked').map(p=>p.item.id));
+return {...data,inboxProcessingLog:(data.inboxProcessingLog||[]).map(r=>confirmed.has(r.id)?{...r,status:'attached',processedAt:at,message:'Інвойс прикріплено до наявного платежу; країну звірено'}:r)};
+}
+
+root.SteuerraumFeatures={invoiceAttachmentPlan,applyInvoiceAttachments,confirmInvoiceAttachments,suggestStatementCountries,incomeCountries,incomeCountryName,incomeCountryGroup,withIncomeCountry,setIncomeCountries,requireStatementIncomeCountry,commuteAllowance,statementHasDeferredRows,filterStatementRows,statementRowSelected,statementSelectionRows,selectStatementRows,cancelStatementDraft,statementScopeAllows,setStatementImportScope,planStatementUndo,undoStatementImport,suggestStatementCategories,allocationSimilar,saveStatementPreview,commitStatementPreview,paymentArray,validatePaymentRecords,savePaymentRecord,removePaymentRecord,insuranceSummary,taxPaymentSummary,paymentCsv,applyPaymentStatement,inferBankPeriod,validateBankExclusions,incomeCountryGroups,validateIncomeRecords,incomeSummary,taxOverview,saveIncomeRecord,removeIncomeRecord,incomeCsv,BANK_REVIEW_CATEGORY,applyBankRows,resolveBankRow,validateAnnualDetails,saveAnnualDetails,validateBankImports,bankCoverage,annualSummaryCsv,completenessAudit,travelCostType,travelCity,suggestTrip,reopenYear,duplicateRecord,closedYear,validateClosedYears,assertClosedYearsUnchanged,closeYear,sameDocument,removeDocument,removeRecord,travelSelected,setTravelSelection,costTypes,validateTrips,tripTotals,travelSummary,documentGroups,documentDate,travelCsv};
 })(globalThis);
