@@ -1,6 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 function setup(){
-const nodes=new Map(),storage=new Map();const node=s=>{if(!nodes.has(s))nodes.set(s,{innerHTML:'',textContent:'',disabled:false,prepend(){},appendChild(){}});return nodes.get(s);};
+const nodes=new Map(),storage=new Map();const node=s=>{if(!nodes.has(s))nodes.set(s,{innerHTML:'',textContent:'',disabled:false,elements:{uploadKind:{value:'bank'},statement:{},importScope:{value:'all'}},prepend(){},appendChild(x){(this.children||=[]).push(x);},insertAdjacentHTML(position,html){this.innerHTML+=html;}});return nodes.get(s);};
 let rowCheckboxes=[];const document={querySelector:node,createElement:()=>({}),querySelectorAll:selector=>{if(selector!=='[data-preview-select]')return [];rowCheckboxes=[...node('#statementPreviewRows').innerHTML.matchAll(/<input[^>]*data-preview-select="([^"]+)"[^>]*>/g)].map(m=>({dataset:{previewSelect:m[1]},checked:/\schecked(?:\s|>)/.test(m[0])}));return rowCheckboxes;}};
 const c={URL,Date,Intl,document,localStorage:{getItem:()=>null,setItem:(k,v)=>storage.set(k,v)},window:{addEventListener(){}},confirm:()=>true};vm.createContext(c);vm.runInContext(fs.readFileSync('features.js','utf8'),c);vm.runInContext(fs.readFileSync('app.js','utf8').replace(/render\(\);\s*$/,''),c);
 const row=(n,company)=>({sourceKey:n.toString(16).padStart(64,'0'),date:'2026-02-03',valueDate:'2026-02-03',amount:n*100,currency:'EUR',direction:'debit',company,description:'Service '+n,ledger:'expense',category:'Arbeitsmittel',included:true});
@@ -10,7 +10,7 @@ test('counterparty filter prevents hidden selection from posting and only-shown 
 const {c,node,storage}=setup();assert.ok(node('#statementPreview').innerHTML.includes('statementCompany'));
 node('#statementCompany').oninput({target:{value:'Target'}});assert.ok(!node('#statementPreviewRows').innerHTML.includes('<b>Other</b>'));assert.equal(node('#statementCommit').disabled,true);assert.ok(node('#statementSelectionSummary').textContent.includes('поза фільтром обрано 1'));
 node('#statementSelectOnly').onclick();assert.equal(c.activeStatement().selectedSourceKeys.length,2);assert.equal(node('#statementCommit').disabled,false);const saved=JSON.parse(storage.get('steuerraum-v1'));assert.equal(saved.records.length,0);assert.equal(saved.bankImports[0].selectedSourceKeys.length,2);
-node('#statementCommit').onclick();assert.equal(vm.runInContext('data.records.length',c),2);assert.equal(c.activeStatement().status,'completed');
+node('#statementCommit').onclick();assert.equal(vm.runInContext('data.records.length',c),2);assert.equal(vm.runInContext('data.bankImports[0].status',c),'completed');assert.equal(c.activeStatement(),undefined);assert.equal(node('#bankAllocationSection').hidden,true);
 });
 test('individual checkbox, visible master checkbox and clear/reset controls keep counts in sync',()=>{
 const {c,node,checkboxes}=setup();node('#statementSelectNone').onclick();assert.equal(node('#statementCommit').disabled,true);
@@ -29,4 +29,15 @@ test('select all shown adds visible rows while preserving a previous selection a
 const {c,node}=setup();node('#statementSelectNone').onclick();node('#statementCompany').oninput({target:{value:'Target'}});node('#statementSelectAllShown').onclick();node('#statementCompany').oninput({target:{value:'Other'}});node('#statementSelectAllShown').onclick();assert.equal(c.activeStatement().selectedSourceKeys.length,3);
 node('#statementCompany').oninput({target:{value:'No results'}});assert.equal(node('#statementSelectAllShown').disabled,true);
 node('#statementResetFilters').onclick();assert.equal(node('#statementCommit').disabled,false);
+});
+
+test('completed imports leave the working list and remain in a closed history without modifying transactions',()=>{
+const {c,node}=setup();vm.runInContext("data.bankImports[0].status='completed';data.bankImports[0].reviewStage='posted';",c);const before=vm.runInContext('JSON.stringify(data)',c);c.renderStatementImports();
+assert.equal(c.activeStatement(),undefined);assert.equal(node('#bankAllocationSection').hidden,true);
+const html=node('#view').innerHTML;assert.ok(html.includes('Історія внесених імпортів'));assert.ok(!html.match(/<details[^>]*id="statementHistory"[^>]*\sopen(?:\s|>)/));assert.ok(!html.match(/<select id="statementSelection">([\s\S]*?)<\/select>/)[1].includes('example.csv'));assert.equal(vm.runInContext('JSON.stringify(data)',c),before);
+vm.runInContext("statementHistoryId='batch';statementSelection='batch';",c);c.renderStatementImports();assert.equal(c.activeStatement().status,'completed');assert.equal(node('#bankAllocationSection').hidden,false);assert.ok(node('#statementPreview').children.some(b=>b.textContent==='Скасувати цей імпорт'));
+node('#statementHistoryBack').onclick();assert.equal(c.activeStatement(),undefined);assert.equal(node('#bankAllocationSection').hidden,true);assert.equal(vm.runInContext('JSON.stringify(data)',c),before);
+});
+test('a completed newest import never displaces an unfinished import from the work area',()=>{
+const {c,node}=setup();vm.runInContext("data.bankImports.push({...data.bankImports[0],id:'done',sourceName:'done.csv',status:'completed',uploadedAt:'2026-03-02T00:00:00Z'});statementSelection='done';",c);c.renderStatementImports();assert.equal(c.activeStatement().id,'batch');assert.equal(node('#bankAllocationSection').hidden,false);const options=node('#view').innerHTML.match(/<select id="statementSelection">([\s\S]*?)<\/select>/)[1];assert.ok(options.includes('example.csv'));assert.ok(!options.includes('done.csv'));
 });
