@@ -79,6 +79,26 @@ const incomeCountries=incomeCountryCodes.map(code=>({code,name:code==='GB'?'Gro�
 function incomeCountryName(code){return code?incomeCountries.find(country=>country.code===code)?.name||code:'';}
 function incomeCountryGroup(code){if(!code)return '';if(!incomeCountryCodes.includes(code))throw Error('Обери країну платника зі списку');return code==='DE'?'Deutschland':incomeEuCountries.has(code)?'Europäische Union':'Drittland';}
 function withIncomeCountry(record,code){return {...record,countryCode:code||'',countryGroup:incomeCountryGroup(code)};}
+
+function incomeCountryMerchant(value){return String(value||'').normalize('NFKC').trim().replace(/\s+/g,' ').toLowerCase();}
+function suggestStatementCountries(rows,incomeRecords=[]){
+if(!Array.isArray(rows)||!Array.isArray(incomeRecords))throw Error('Некоректний розподіл доходів');
+const history=new Map();
+for(const source of incomeRecords){
+const merchant=incomeCountryMerchant(source.company),code=source.countryCode;
+if(merchant.length<4||!incomeCountryCodes.includes(code)||source.bankReview==='pending')continue;
+if(/^(unknown|unbekannt|überweisung|gutschrift|sepa|bank|abrechnung karte)$/i.test(merchant)||/\b(paypal|stripe|wise|revolut|sumup|square|amazon|ebay|payment|payments)\b/i.test(merchant))continue;
+if(!history.has(merchant))history.set(merchant,new Map());
+history.get(merchant).set(code,source.id);
+}
+return rows.map(row=>{
+if(row.ledger!=='income'||row.direction!=='credit'||row.matchId||row.included===false||row.countrySelection==='manual'||row.countryCode&&row.countrySelection!=='auto')return row;
+const countries=history.get(incomeCountryMerchant(row.company));
+if(countries?.size===1){const [code,id]=countries.entries().next().value;return {...withIncomeCountry(row,code),countrySelection:'auto',countrySuggestedBy:id||null};}
+return row.countrySelection==='auto'?{...withIncomeCountry(row,''),countrySelection:null,countrySuggestedBy:null}:row;
+});
+}
+
 function setIncomeCountries(data,ids,code){
 incomeCountryGroup(code);if(!code||!Array.isArray(ids)||!ids.length)throw Error('Обери країну та записи доходу');
 const selected=new Set(ids);for(const id of selected)if(!(data.incomeRecords||[]).some(row=>row.id===id))throw Error('Запис доходу не знайдено');
@@ -128,7 +148,7 @@ function resolveBankRow(data,batchId,key,action,recordId,at){const row=(data.ban
 
 
 function previewRows(entry){return Array.isArray(entry.previewRows)?entry.previewRows:[];}
-function saveStatementPreview(data,id,rows){rows=rows.map(row=>row?.ledger==='income'&&row.countryCode?withIncomeCountry(row,row.countryCode):row);const entry=(data.bankImports||[]).find(x=>x.id===id);if(!entry||['completed','cancelled'].includes(entry.status))throw Error('Виписку не знайдено, її вже внесено або завантаження видалено');const ids=new Set();for(const row of rows){if(!row||!/^[a-f0-9]{64}$/i.test(row.sourceKey)||ids.has(row.sourceKey)||!validDate(row.date)||!Number.isSafeInteger(row.amount)||row.amount<=0||!['expense','income','insurance','tax','ignore'].includes(row.ledger)||row.direction==='credit'&&row.ledger==='expense'||row.direction==='debit'&&row.ledger==='income')throw Error('Некоректний розподіл операції');ids.add(row.sourceKey);}const next={...data,bankImports:data.bankImports.map(x=>x.id===id?{...x,previewRows:rows,reviewRequired:true,reviewStage:'allocation',status:'needs_review'}:x)};assertClosedYearsUnchanged(data,next);return next;}
+function saveStatementPreview(data,id,rows){rows=suggestStatementCountries(rows,data.incomeRecords||[]);rows=rows.map(row=>row?.ledger==='income'&&row.countryCode?withIncomeCountry(row,row.countryCode):row);const entry=(data.bankImports||[]).find(x=>x.id===id);if(!entry||['completed','cancelled'].includes(entry.status))throw Error('Виписку не знайдено, її вже внесено або завантаження видалено');const ids=new Set();for(const row of rows){if(!row||!/^[a-f0-9]{64}$/i.test(row.sourceKey)||ids.has(row.sourceKey)||!validDate(row.date)||!Number.isSafeInteger(row.amount)||row.amount<=0||!['expense','income','insurance','tax','ignore'].includes(row.ledger)||row.direction==='credit'&&row.ledger==='expense'||row.direction==='debit'&&row.ledger==='income')throw Error('Некоректний розподіл операції');ids.add(row.sourceKey);}const next={...data,bankImports:data.bankImports.map(x=>x.id===id?{...x,previewRows:rows,reviewRequired:true,reviewStage:'allocation',status:'needs_review'}:x)};assertClosedYearsUnchanged(data,next);return next;}
 
 function statementFilterText(value){return String(value||'').normalize('NFKC').trim().replace(/\s+/g,' ').toLowerCase();}
 function filterStatementRows(entry,filters={}){
@@ -226,5 +246,5 @@ function setStatementImportScope(data,id,scope){if(!['all','income','expenses'].
 
 function cancelStatementDraft(data,id,at=new Date().toISOString()){const entry=(data.bankImports||[]).find(r=>r.id===id);if(!entry)throw Error('Завантаження не знайдено');if(entry.status==='completed')throw Error('Цю виписку вже внесено. Для неї використовуй скасування імпорту.');if(entry.status==='cancelled')return data;if(closedYear(data,entry.year))throw Error('Рік закритий. Спочатку відкрий його для редагування.');const next={...data,bankImports:data.bankImports.map(r=>r.id===id?{...r,status:'cancelled',reviewStage:'cancelled',reviewRequired:false,cancelledAt:at,previewRows:[],unresolvedRows:[]}:r)};assertClosedYearsUnchanged(data,next);return next;}
 
-root.SteuerraumFeatures={incomeCountries,incomeCountryName,incomeCountryGroup,withIncomeCountry,setIncomeCountries,requireStatementIncomeCountry,commuteAllowance,statementHasDeferredRows,filterStatementRows,statementRowSelected,statementSelectionRows,selectStatementRows,cancelStatementDraft,statementScopeAllows,setStatementImportScope,planStatementUndo,undoStatementImport,suggestStatementCategories,allocationSimilar,saveStatementPreview,commitStatementPreview,paymentArray,validatePaymentRecords,savePaymentRecord,removePaymentRecord,insuranceSummary,taxPaymentSummary,paymentCsv,applyPaymentStatement,inferBankPeriod,validateBankExclusions,incomeCountryGroups,validateIncomeRecords,incomeSummary,taxOverview,saveIncomeRecord,removeIncomeRecord,incomeCsv,BANK_REVIEW_CATEGORY,applyBankRows,resolveBankRow,validateAnnualDetails,saveAnnualDetails,validateBankImports,bankCoverage,annualSummaryCsv,completenessAudit,travelCostType,travelCity,suggestTrip,reopenYear,duplicateRecord,closedYear,validateClosedYears,assertClosedYearsUnchanged,closeYear,sameDocument,removeDocument,removeRecord,travelSelected,setTravelSelection,costTypes,validateTrips,tripTotals,travelSummary,documentGroups,documentDate,travelCsv};
+root.SteuerraumFeatures={suggestStatementCountries,incomeCountries,incomeCountryName,incomeCountryGroup,withIncomeCountry,setIncomeCountries,requireStatementIncomeCountry,commuteAllowance,statementHasDeferredRows,filterStatementRows,statementRowSelected,statementSelectionRows,selectStatementRows,cancelStatementDraft,statementScopeAllows,setStatementImportScope,planStatementUndo,undoStatementImport,suggestStatementCategories,allocationSimilar,saveStatementPreview,commitStatementPreview,paymentArray,validatePaymentRecords,savePaymentRecord,removePaymentRecord,insuranceSummary,taxPaymentSummary,paymentCsv,applyPaymentStatement,inferBankPeriod,validateBankExclusions,incomeCountryGroups,validateIncomeRecords,incomeSummary,taxOverview,saveIncomeRecord,removeIncomeRecord,incomeCsv,BANK_REVIEW_CATEGORY,applyBankRows,resolveBankRow,validateAnnualDetails,saveAnnualDetails,validateBankImports,bankCoverage,annualSummaryCsv,completenessAudit,travelCostType,travelCity,suggestTrip,reopenYear,duplicateRecord,closedYear,validateClosedYears,assertClosedYearsUnchanged,closeYear,sameDocument,removeDocument,removeRecord,travelSelected,setTravelSelection,costTypes,validateTrips,tripTotals,travelSummary,documentGroups,documentDate,travelCsv};
 })(globalThis);
