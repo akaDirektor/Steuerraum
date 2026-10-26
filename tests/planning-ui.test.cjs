@@ -15,3 +15,12 @@ c.fixture.annualObligations=[];delete c.fixture.insuranceProjectionProfile;asser
 assert.equal(c.balanceTone(NaN),'');
 const mixed=settlement(500);mixed.settlement.byType={Einkommensteuer:{...mixed.settlement.total,status:'due',balance:1000,amount:1000},Gewerbesteuer:{...mixed.settlement.total,status:'overpaid',balance:-500,amount:500}};const html=c.taxSettlementPanel(mixed);assert.ok(html.includes('taxBalanceResult due'));assert.ok(html.includes('taxBalanceResult overpaid'));
 });
+
+test('insurance form infers parenthood from child count and only shows adult-child checkbox when needed',()=>{
+const {c,node}=setup();c.localStorage.setItem=()=>{};c.render=()=>{};
+node('#insuranceProjectionForm').elements={age:{value:'40'},childrenUnder25:{value:'2'},hasChildren:{checked:false,disabled:false},sickPay:{checked:false},annualIncomeOverrideCents:{value:''},otherIncomeCents:{value:'0'},months:{value:'12'}};
+c.renderPaymentLedger('insurance');const form=node('#insuranceProjectionForm');
+assert.equal(form.elements.hasChildren.checked,true);assert.equal(form.elements.hasChildren.disabled,true);assert.equal(node('#insuranceAdultChildren').hidden,true);
+form.elements.hasChildren.checked=false;form.onsubmit({preventDefault(){}});assert.equal(vm.runInContext("data.insuranceProjectionProfiles['2026'].hasChildren",c),true);assert.equal(node('#insuranceProjectionError').textContent,undefined);
+form.elements.childrenUnder25.value='0';form.elements.childrenUnder25.oninput();assert.equal(node('#insuranceAdultChildren').hidden,false);assert.equal(form.elements.hasChildren.disabled,false);
+});
