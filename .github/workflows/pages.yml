@@ -37,7 +37,7 @@ jobs:
       - name: Build public application
         run: |
           mkdir _site
-          cp index.html style.css app.js features.js tax-estimate.js obligation-planning.js bank-parser.js icon.svg .nojekyll _site/
+          cp index.html style.css app.js features.js tax-estimate.js obligation-planning.js bank-parser.js icon.svg icon-32.png icon-180.png icon-192.png icon-512.png manifest.webmanifest .nojekyll _site/
           npx --no-install esbuild cloud-entry.js --bundle --format=iife --target=es2022 --minify --outfile=_site/cloud.js
       - uses: actions/upload-pages-artifact@v3
         with:
