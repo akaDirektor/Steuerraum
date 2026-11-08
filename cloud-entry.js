@@ -339,6 +339,7 @@ function validExpenseReceiptQueue(queue){
     if(group.ledger!==undefined&&!['expense','income'].includes(group.ledger))throw Error('Некоректний тип операції');
     if(group.ledger==='income'&&(!group.logId||group.documents.length!==1||group.targets.length!==1))throw Error('Некоректна прив’язка інвойсу');
     for(const doc of group.documents){
+      if(doc.directLink===true&&(!doc.archiveParentId||doc.relocate))throw Error('Пряме посилання потребує кінцевого архіву');
       if(!doc.itemId||fileIds.has(doc.itemId)||typeof doc.name!=='string'||!/\.pdf$/i.test(doc.name)||
          !Number.isSafeInteger(doc.size)||doc.size<=0||typeof doc.hash!=='string'||!doc.hash||hashes.has(doc.hash)||
          (doc.archiveParentId!==undefined&&(typeof doc.archiveParentId!=='string'||!doc.archiveParentId))||!/^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(doc.date)){
@@ -373,41 +374,58 @@ function eligibleExpenseReceiptGroup(register,group){
   const targets=new Set(group.targets.map(t=>t.id));
   const otherRecords=[...register.records,...(register.incomeRecords||[])].filter(record=>!targets.has(record.id));
   if(otherRecords.some(record=>group.documents.some(doc=>matchingReceiptLink(record,doc))))return false;
+  if(group.documents.every(doc=>doc.directLink===true)){
+    return records.every(record=>group.documents.every(doc=>
+      (record.links||[]).some(link=>verifiedReceiptLink(link,doc))));
+  }
   return records.every(record=>
     (record.links||[]).every(link=>group.documents.some(doc=>link.driveItemId===doc.itemId||link.sourceHash==='quickxor:'+doc.hash))&&
     group.documents.every(doc=>matchingReceiptLink(record,doc)||
       !(register.inboxProcessingLog||[]).some(log=>log.id===(group.logId||receiptLogId(doc.itemId,record.id))&&log.status==='attached')));
 }
 
+function verifiedReceiptLink(link,doc){
+  return link.driveItemId===doc.itemId&&link.sourceHash==='quickxor:'+doc.hash;
+}
+
 async function readReceiptDocument(doc,inboxId,requireInbox){
   const fields='id,name,size,file,parentReference,sharepointIds,webUrl,eTag';
   const meta=await(await graph('/me/drive/items/'+encodeURIComponent(doc.itemId)+'?$select='+fields)).json();
   const expectedParent=doc.archiveParentId||inboxId;
+  const checkParent=requireInbox||doc.directLink===true;
   if(meta.id!==doc.itemId||meta.name!==doc.name||meta.size!==doc.size||meta.file?.hashes?.quickXorHash!==doc.hash||
-    (requireInbox&&meta.parentReference?.id!==expectedParent))throw Error('PDF змінився або зник');
-  if(doc.archiveParentId&&requireInbox){
+    (checkParent&&meta.parentReference?.id!==expectedParent))throw Error('PDF змінився або зник');
+  if(doc.archiveParentId&&checkParent){
     const archivePath=decodeURIComponent(String(meta.parentReference?.path||'').split('root:')[1]||'');
     const yearRoot='/'+pathParts(configuredPath).join('/')+'/'+doc.date.slice(0,4);
     if(archivePath!==yearRoot&&!archivePath.startsWith(yearRoot+'/'))throw Error('PDF знаходиться поза архівом року');
   }
-  const site=new URL(meta.sharepointIds.siteUrl);
+  const site=new URL(meta.sharepointIds.siteUrl),web=new URL(meta.webUrl);
   if(site.protocol!=='https:'||!site.hostname.endsWith('.sharepoint.com')||
-    site.origin!==new URL(meta.webUrl).origin||!/^[0-9a-f-]{36}$/i.test(meta.sharepointIds.listItemUniqueId)){
+    site.origin!==web.origin||!/^[0-9a-f-]{36}$/i.test(meta.sharepointIds.listItemUniqueId)){
     throw Error('OneDrive не повернув приватне посилання на PDF');
   }
-  return {...doc,url:invoiceStableUrl(meta),parentId:meta.parentReference?.id,eTag:meta.eTag};
+  if(doc.directLink===true&&decodeURIComponent(web.pathname).split('/').at(-1)!==meta.name){
+    throw Error('OneDrive не повернув адресу конкретного PDF');
+  }
+  return {...doc,url:doc.directLink===true?web.href:invoiceStableUrl(meta),parentId:meta.parentReference?.id,eTag:meta.eTag};
 }
 
 function appendExpenseReceiptGroup(register,group,at){
   const ledger=group.ledger||'expense',field=ledger==='income'?'incomeRecords':'records';
   const records=(register[field]||[]).map(record=>group.targets.some(t=>t.id===record.id)?{...record,
-    links:[...(record.links||[]),...group.documents.filter(doc=>!matchingReceiptLink(record,doc)).map(doc=>({
+    links:[...(record.links||[]).map(link=>{
+      const direct=group.documents.find(doc=>doc.directLink===true&&verifiedReceiptLink(link,doc));
+      return direct?{...link,url:direct.url}:link;
+    }),...group.documents.filter(doc=>doc.directLink!==true&&!matchingReceiptLink(record,doc)).map(doc=>({
       name:doc.name,url:doc.url,documentDate:doc.date,driveItemId:doc.itemId,sourceHash:'quickxor:'+doc.hash,
     }))]}:record);
   const log=new Map((register.inboxProcessingLog||[]).map(row=>[row.id,row]));
   for(const target of group.targets)for(const doc of group.documents){
     const id=group.logId||receiptLogId(doc.itemId,target.id);
-    if(log.get(id)?.status!=='attached')log.set(id,{id,sourcePackageId:doc.itemId,sourceHash:'quickxor:'+doc.hash,
+    const prior=log.get(id);
+    if(doc.directLink===true&&prior?.status==='attached')log.set(id,{...prior,documentUrl:doc.url});
+    else if(prior?.status!=='attached')log.set(id,{id,sourcePackageId:doc.itemId,sourceHash:'quickxor:'+doc.hash,
       processedAt:at,fileName:doc.name,documentUrl:doc.url,status:'attached',recordId:target.id,
       ledger,message:'Документ прикріплено до наявної операції'});
   }
@@ -510,8 +528,11 @@ async function syncExpenseReceiptQueue(manual=false){
     const documents=ready.flatMap(group=>group.targets.every(target=>{
       const source=group.ledger==='income'?(verified.incomeRecords||[]):verified.records;
       const record=source.find(row=>row.id===target.id);
-      return record&&group.documents.every(doc=>matchingReceiptLink(record,doc)&&
-        verified.inboxProcessingLog?.some(log=>log.id===(group.logId||receiptLogId(doc.itemId,target.id))&&log.status==='attached'));
+      return record&&group.documents.every(doc=>
+        (doc.directLink===true?(record.links||[]).some(link=>verifiedReceiptLink(link,doc)&&link.url===doc.url):
+          matchingReceiptLink(record,doc))&&verified.inboxProcessingLog?.some(log=>
+            log.id===(group.logId||receiptLogId(doc.itemId,target.id))&&log.status==='attached'&&
+            (doc.directLink!==true||log.documentUrl===doc.url)));
     })?group.documents:[]);
     if(documents.length!==ready.reduce((total,group)=>total+group.documents.length,0)){
       throw Error('OneDrive не підтвердив усі вкладення');

@@ -264,3 +264,29 @@ test('INBOX can attach the existing archive copy and checks its exact parent and
  path='/drive/root:/private/elsewhere/2024/02';
  await assert.rejects(ctx.readReceiptDocument(doc,'inbox',true),/поза архівом/);
 });
+
+
+test('direct PDF repair updates only the existing receipt link and its journal URL',async()=>{
+ const meta={
+  id:'pdf',name:'Archived receipt.pdf',size:20,file:{hashes:{quickXorHash:'hash'}},
+  parentReference:{id:'archive',path:'/drive/root:/private/folder/2024/02'},
+  webUrl:'https://tenant.sharepoint.com/Documents/Archived%20receipt.pdf',
+  sharepointIds:{siteUrl:'https://tenant.sharepoint.com/',listItemUniqueId:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'},
+ };
+ const {ctx}=setup(async()=>({ok:true,json:async()=>meta}));
+ const doc={itemId:'pdf',name:meta.name,hash:'hash',size:20,date:'2024-02-01',archiveParentId:'archive',directLink:true};
+ const old={name:meta.name,driveItemId:'pdf',sourceHash:'quickxor:hash',url:'https://tenant.sharepoint.com/_layouts/15/Doc.aspx?sourcedoc=x'};
+ const other={name:'Payment proof',url:'https://tenant.sharepoint.com/payment.pdf'};
+ const register=reg([{...row('id'),links:[old,other]}]);
+ const target={id:'id',date:'2024-01-02',amount:1000,company:'Example'};
+ const archived=await ctx.readReceiptDocument(doc,'inbox',false);
+ const group={documents:[archived],targets:[target]};
+ assert.equal(ctx.eligibleExpenseReceiptGroup(register,group),true);
+ assert.equal(ctx.eligibleExpenseReceiptGroup(reg([{...row('id'),links:[]}]),group),false);
+ register.inboxProcessingLog=[{id:'expense-receipt-pdf-id',status:'attached',documentUrl:old.url,processedAt:'original'}];
+ const actual=clone(ctx.appendExpenseReceiptGroup(register,group,'new'));
+ assert.deepEqual(actual.records,[{...register.records[0],links:[{...old,url:meta.webUrl},other]}]);
+ assert.deepEqual(actual.inboxProcessingLog,[{...register.inboxProcessingLog[0],documentUrl:meta.webUrl}]);
+ meta.webUrl='https://tenant.sharepoint.com/Documents/';
+ await assert.rejects(ctx.readReceiptDocument(doc,'inbox',false),/конкретного PDF/);
+});
