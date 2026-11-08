@@ -321,7 +321,7 @@ let expenseReceiptTimer=null,expenseReceiptRunning=false,completedExpenseReceipt
 
 function queueExpenseReceiptSync(){
   clearTimeout(expenseReceiptTimer);
-  expenseReceiptTimer=setTimeout(syncExpenseReceiptQueue,350);
+  expenseReceiptTimer=setTimeout(()=>void syncExpenseReceiptQueue(),350);
 }
 
 function receiptLogId(itemId,recordId){
@@ -329,12 +329,15 @@ function receiptLogId(itemId,recordId){
 }
 
 function validExpenseReceiptQueue(queue){
-  if(queue?.version!==1||!Array.isArray(queue.groups)||queue.groups.length>500)throw Error('Некоректний список рахунків');
+  if(queue?.version!==1||!Array.isArray(queue.groups)||queue.groups.length>500||
+     (queue.review!==undefined&&(!Array.isArray(queue.review)||queue.review.length>100)))throw Error('Некоректний список рахунків');
   const fileIds=new Set(),hashes=new Set(),targetIds=new Set();
   for(const group of queue.groups){
     if(!Array.isArray(group.documents)||!group.documents.length||!Array.isArray(group.targets)||!group.targets.length){
       throw Error('Неповна група рахунків');
     }
+    if(group.ledger!==undefined&&!['expense','income'].includes(group.ledger))throw Error('Некоректний тип операції');
+    if(group.ledger==='income'&&(!group.logId||group.documents.length!==1||group.targets.length!==1))throw Error('Некоректна прив’язка інвойсу');
     for(const doc of group.documents){
       if(!doc.itemId||fileIds.has(doc.itemId)||typeof doc.name!=='string'||!/\.pdf$/i.test(doc.name)||
          !Number.isSafeInteger(doc.size)||doc.size<=0||typeof doc.hash!=='string'||!doc.hash||hashes.has(doc.hash)||!/^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(doc.date)){
@@ -358,23 +361,26 @@ function matchingReceiptLink(record,doc){
 }
 
 function eligibleExpenseReceiptGroup(register,group){
-  const records=group.targets.map(target=>register.records.find(row=>row.id===target.id));
+  const source=group.ledger==='income'?(register.incomeRecords||[]):register.records;
+  const records=group.targets.map(target=>source.find(row=>row.id===target.id));
   if(records.some((record,i)=>{
     const target=group.targets[i];
     return !record||record.date!==target.date||record.amount!==target.amount||record.company!==target.company||
+      (target.countryCode!==undefined&&record.countryCode!==target.countryCode)||
       SteuerraumFeatures.closedYear(register,target.date.slice(0,4));
   }))return false;
   const targets=new Set(group.targets.map(t=>t.id));
-  const otherRecords=[...register.records.filter(record=>!targets.has(record.id)),...(register.incomeRecords||[])];
+  const otherRecords=[...register.records,...(register.incomeRecords||[])].filter(record=>!targets.has(record.id));
   if(otherRecords.some(record=>group.documents.some(doc=>matchingReceiptLink(record,doc))))return false;
   return records.every(record=>
     (record.links||[]).every(link=>group.documents.some(doc=>link.driveItemId===doc.itemId||link.sourceHash==='quickxor:'+doc.hash))&&
     group.documents.every(doc=>matchingReceiptLink(record,doc)||
-      !(register.inboxProcessingLog||[]).some(log=>log.id===receiptLogId(doc.itemId,record.id)&&log.status==='attached')));
+      !(register.inboxProcessingLog||[]).some(log=>log.id===(group.logId||receiptLogId(doc.itemId,record.id))&&log.status==='attached')));
 }
 
 async function readReceiptDocument(doc,inboxId,requireInbox){
-  const meta=await(await graph('/me/drive/items/'+encodeURIComponent(doc.itemId))).json();
+  const fields='id,name,size,file,parentReference,sharepointIds,webUrl,eTag';
+  const meta=await(await graph('/me/drive/items/'+encodeURIComponent(doc.itemId)+'?$select='+fields)).json();
   if(meta.id!==doc.itemId||meta.name!==doc.name||meta.size!==doc.size||meta.file?.hashes?.quickXorHash!==doc.hash||
     (requireInbox&&meta.parentReference?.id!==inboxId))throw Error('PDF в INBOX змінився або зник');
   const site=new URL(meta.sharepointIds.siteUrl);
@@ -386,18 +392,19 @@ async function readReceiptDocument(doc,inboxId,requireInbox){
 }
 
 function appendExpenseReceiptGroup(register,group,at){
-  const records=register.records.map(record=>group.targets.some(t=>t.id===record.id)?{...record,
+  const ledger=group.ledger||'expense',field=ledger==='income'?'incomeRecords':'records';
+  const records=(register[field]||[]).map(record=>group.targets.some(t=>t.id===record.id)?{...record,
     links:[...(record.links||[]),...group.documents.filter(doc=>!matchingReceiptLink(record,doc)).map(doc=>({
       name:doc.name,url:doc.url,documentDate:doc.date,driveItemId:doc.itemId,sourceHash:'quickxor:'+doc.hash,
     }))]}:record);
   const log=new Map((register.inboxProcessingLog||[]).map(row=>[row.id,row]));
   for(const target of group.targets)for(const doc of group.documents){
-    const id=receiptLogId(doc.itemId,target.id);
-    if(!log.has(id))log.set(id,{id,sourcePackageId:doc.itemId,sourceHash:'quickxor:'+doc.hash,
+    const id=group.logId||receiptLogId(doc.itemId,target.id);
+    if(log.get(id)?.status!=='attached')log.set(id,{id,sourcePackageId:doc.itemId,sourceHash:'quickxor:'+doc.hash,
       processedAt:at,fileName:doc.name,documentUrl:doc.url,status:'attached',recordId:target.id,
-      ledger:'expense',message:'Документ прикріплено до наявної витрати'});
+      ledger,message:'Документ прикріплено до наявної операції'});
   }
-  return {...register,records,inboxProcessingLog:[...log.values()]};
+  return {...register,[field]:records,inboxProcessingLog:[...log.values()]};
 }
 
 async function archiveExpenseReceipts(root,documents,inboxId,guard){
@@ -407,56 +414,73 @@ async function archiveExpenseReceipts(root,documents,inboxId,guard){
   for(const doc of documents){
     if(doc.parentId!==inboxId)continue;
     guard();
-    const month=doc.date.slice(0,7);
-    if(!months.has(month)){
+    const month=doc.date.slice(0,7),kind=doc.ledger==='income'?'Інвойси':'Рахунки',key=kind+'|'+month;
+    if(!months.has(key)){
       const year=await invoiceChildFolder(parent.id,month.slice(0,4));
-      const receipts=await invoiceChildFolder(year.id,'Рахунки');
-      months.set(month,(await invoiceChildFolder(receipts.id,month.slice(5),true)).id);
+      const receipts=await invoiceChildFolder(year.id,kind);
+      months.set(key,(await invoiceChildFolder(receipts.id,month.slice(5),true)).id);
     }
     guard();
     const moved=await(await graph('/me/drive/items/'+encodeURIComponent(doc.itemId),{
       method:'PATCH',headers:{'Content-Type':'application/json',...(doc.eTag?{'If-Match':doc.eTag}:{})},
-      body:JSON.stringify({parentReference:{id:months.get(month)}}),
+      body:JSON.stringify({parentReference:{id:months.get(key)}}),
     })).json();
-    if(moved.parentReference?.id!==months.get(month))throw Error('Перенесення PDF не підтверджено');
+    if(moved.parentReference?.id!==months.get(key))throw Error('Перенесення PDF не підтверджено');
   }
 }
 
-async function syncExpenseReceiptQueue(){
-  if(expenseReceiptRunning||!cloudAccount||!configuredPath||needsReauth||conflict)return;
+async function syncExpenseReceiptQueue(manual=false){
+  if(expenseReceiptRunning){if(manual)throw Error('INBOX уже опрацьовується. Дочекайся завершення.');return;}
+  if(!cloudAccount||!configuredPath||needsReauth||conflict){
+    if(manual)throw Error('Підключи OneDrive і заверши звірку змін.');
+    return;
+  }
   expenseReceiptRunning=true;
   const scope=cloudScope(),root=cloudRootPath();
   const guard=()=>{if(scope!==cloudScope()||needsReauth||conflict)throw Error('Підключення OneDrive змінилося');};
   try{
     let queueFile;
     try{queueFile=await(await graph(root+'/'+expenseReceiptQueueFile)).json();}
-    catch(error){if(error.status===404)return;throw error;}
+    catch(error){if(error.status===404)return {attached:0,review:0};throw error;}
     const queueVersion=scope+'|'+queueFile.eTag;
-    if(completedExpenseReceiptVersion===queueVersion)return;
+    if(completedExpenseReceiptVersion===queueVersion&&!manual)return;
     const url=new URL(queueFile['@microsoft.graph.downloadUrl']);
     if(url.protocol!=='https:'||!queueFile.eTag||queueFile.size>1024*1024)throw Error('Некоректна черга рахунків');
     const response=await fetch(url.href,{cache:'no-store',credentials:'omit'});
     if(!response.ok)throw Error('Черга рахунків недоступна');
     const queue=validExpenseReceiptQueue(await response.json());
-    if(!queue.groups.length)return;
+    if(!queue.groups.length&&!queue.review?.length)return {attached:0,review:0};
     const inbox=await(await graph(root+'/INBOX?$select=id')).json();
     const {item,remote}=await readRemote();
     guard();
     const ready=[];
+    let problems=0;
     for(const group of queue.groups){
-      if(!eligibleExpenseReceiptGroup(remote,group))continue;
+      if(!eligibleExpenseReceiptGroup(remote,group)){problems++;continue;}
+      const source=group.ledger==='income'?(remote.incomeRecords||[]):remote.records;
       const alreadyAttached=group.targets.every(target=>group.documents.every(doc=>
-        matchingReceiptLink(remote.records.find(r=>r.id===target.id),doc)));
+        matchingReceiptLink(source.find(r=>r.id===target.id),doc)));
       try{
         guard();
-        const documents=await Promise.all(group.documents.map(doc=>readReceiptDocument(doc,inbox.id,!alreadyAttached)));
+        const documents=await Promise.all(group.documents.map(async doc=>({...await readReceiptDocument(doc,inbox.id,!alreadyAttached),ledger:group.ledger||'expense'})));
         ready.push({...group,documents});
-      }catch(error){console.warn('Steuerraum: PDF потребує перевірки.',error.status||'');}
+      }catch(error){problems++;console.warn('Steuerraum: PDF потребує перевірки.',error.message);}
     }
-    if(ready.length<queue.groups.length&&typeof message==='function')message('Деякі рахунки в INBOX потребують повторної звірки.',true);
-    if(!ready.length)return;
     const at=new Date().toISOString();
-    const next=validate(ready.reduce((register,group)=>appendExpenseReceiptGroup(register,group,at),remote));
+    let next=ready.reduce((register,group)=>appendExpenseReceiptGroup(register,group,at),remote);
+    if(queue.review?.length){
+      const log=new Map((next.inboxProcessingLog||[]).map(entry=>[entry.id,entry]));
+      for(const entry of queue.review){
+        if(typeof entry.id!=='string'||typeof entry.fileName!=='string'||typeof entry.message!=='string')throw Error('Некоректний запис перевірки');
+        const url=new URL(entry.documentUrl);
+        if(url.protocol!=='https:'||!url.hostname.endsWith('.sharepoint.com'))throw Error('Некоректне посилання для перевірки');
+        if(!log.has(entry.id))log.set(entry.id,{id:entry.id,fileName:entry.fileName,message:entry.message,
+          sourcePackageId:entry.id,sourceHash:entry.sourceHash||'',documentUrl:url.href,status:'needs_review',
+          processedAt:at,ledger:'income',recordId:null});
+      }
+      next={...next,inboxProcessingLog:[...log.values()]};
+    }
+    next=validate(next);
     let verified=remote;
     if(stable(next)!==stable(remote)){
       SteuerraumFeatures.assertClosedYearsUnchanged(remote,next);
@@ -475,9 +499,10 @@ async function syncExpenseReceiptQueue(){
       await syncCloud();
     }
     const documents=ready.flatMap(group=>group.targets.every(target=>{
-      const record=verified.records.find(row=>row.id===target.id);
+      const source=group.ledger==='income'?(verified.incomeRecords||[]):verified.records;
+      const record=source.find(row=>row.id===target.id);
       return record&&group.documents.every(doc=>matchingReceiptLink(record,doc)&&
-        verified.inboxProcessingLog?.some(log=>log.id===receiptLogId(doc.itemId,target.id)&&log.status==='attached'));
+        verified.inboxProcessingLog?.some(log=>log.id===(group.logId||receiptLogId(doc.itemId,target.id))&&log.status==='attached'));
     })?group.documents:[]);
     if(documents.length!==ready.reduce((total,group)=>total+group.documents.length,0)){
       throw Error('OneDrive не підтвердив усі вкладення');
@@ -485,7 +510,9 @@ async function syncExpenseReceiptQueue(){
     await archiveExpenseReceipts(root,documents,inbox.id,guard);
     if(ready.length===queue.groups.length)completedExpenseReceiptVersion=queueVersion;
     void refreshInboxAudit();
+    return {attached:documents.length,review:problems+(queue.review?.length||0)};
   }catch(error){
+    if(manual)throw error;
     if(error.status===412)queueExpenseReceiptSync();
     else {
       console.warn('Steuerraum: не вдалося завершити прикріплення рахунків.',error.status||'');
@@ -495,5 +522,6 @@ async function syncExpenseReceiptQueue(){
 }
 
 
+window.applySteuerraumInboxReceipts=()=>syncExpenseReceiptQueue(true);
 if(typeof setInterval==='function')setInterval(()=>{void refreshMissingExpenseDocuments();void syncExpenseReceiptQueue();},missingExpenseRefreshMs);
 init();

@@ -224,3 +224,28 @@ test('verified receipts can cover two expenses or share one expense without chan
  const mismatched={...data,records:data.records.map(r=>r.id==='split'?{...r,amount:1001}:r)};
  assert.equal(ctx.eligibleExpenseReceiptGroup(mismatched,groups[0]),false);
 });
+
+
+test('INBOX requests the private PDF metadata and preserves the financial fields of income payments',async()=>{
+ const {ctx}=setup(async url=>{
+  assert.match(url,/\$select=id,name,size,file,parentReference,sharepointIds,webUrl,eTag$/);
+  return {ok:true,json:async()=>({
+   id:'invoice',name:'invoice.pdf',size:42,file:{hashes:{quickXorHash:'hash'}},
+   parentReference:{id:'inbox'},webUrl:'https://tenant.sharepoint.com/files/invoice.pdf',
+   sharepointIds:{siteUrl:'https://tenant.sharepoint.com/site',listItemUniqueId:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'},
+  })};
+ });
+ const doc=await ctx.readReceiptDocument({itemId:'invoice',name:'invoice.pdf',size:42,hash:'hash',date:'2024-01-02'},'inbox',true);
+ const income={...row('payment'),countryCode:'DE',bankSourceKeys:['kept'],invoiceNumber:'owner'};
+ const register={...reg([row('expense')]),incomeRecords:[income]};
+ const group={ledger:'income',logId:'known-invoice',documents:[doc],
+  targets:[{id:income.id,date:income.date,company:income.company,amount:income.amount,countryCode:'DE'}]};
+ assert.equal(ctx.eligibleExpenseReceiptGroup(register,group),true);
+ const next=clone(ctx.appendExpenseReceiptGroup(register,group,'2024-01-03T00:00:00Z'));
+ const {links,...unchanged}=next.incomeRecords[0];
+ assert.deepEqual(unchanged,Object.fromEntries(Object.entries(income).filter(([key])=>key!=='links')));
+ assert.deepEqual(next.records,register.records);
+ assert.equal(next.inboxProcessingLog[0].id,'known-invoice');
+ assert.equal(next.inboxProcessingLog[0].ledger,'income');
+ assert.match(links[0].url,/Doc\.aspx\?sourcedoc=/);
+});

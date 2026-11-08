@@ -233,8 +233,20 @@ function renderInboxProcessingLog(){
 const host=document.createElement('section');host.className='panel bankBody';host.id='inboxProcessingLog';
 const labels={attached:'Прикріплено до наявної операції',created:'Створено нову операцію',needs_review:'Потрібна перевірка',duplicate:'Повторний файл',failed:'Помилка'};
 const rows=[...(data.inboxProcessingLog||[])].sort((a,b)=>String(b.processedAt||'').localeCompare(String(a.processedAt||'')));
-host.innerHTML='<h2>Журнал обробки INBOX</h2><p>Історія обробки документів. Для виписок розподіл і підтвердження показані вище.</p><div class="filters"><select id="inboxLogStatus">'+statementOptions([['','Усі результати'],...Object.entries(labels)],'')+'</select></div><div class="tablewrap"><table><thead><tr><th>Оброблено</th><th>Документ</th><th>Результат</th><th>Операція</th><th>Деталі</th></tr></thead><tbody id="inboxLogRows"></tbody></table></div><p id="inboxLogEmpty"></p>';
+host.innerHTML='<h2>Журнал обробки INBOX</h2><p>Історія обробки документів. Для виписок розподіл і підтвердження показані вище.</p><button type="button" id="inboxApplyReceipts">Опрацювати INBOX</button><div class="filters"><select id="inboxLogStatus">'+statementOptions([['','Усі результати'],...Object.entries(labels)],'')+'</select></div><div class="tablewrap"><table><thead><tr><th>Оброблено</th><th>Документ</th><th>Результат</th><th>Операція</th><th>Деталі</th></tr></thead><tbody id="inboxLogRows"></tbody></table></div><p id="inboxLogEmpty"></p>';
 $('#view').appendChild(host);
+const apply=$('#inboxApplyReceipts');
+if(apply)apply.onclick=async()=>{
+  apply.disabled=true;
+  message('Перевіряємо документи й зберігаємо прив’язки в OneDrive…');
+  try{
+    if(typeof window.applySteuerraumInboxReceipts!=='function')throw Error('Онови сторінку Steuerraum.');
+    const result=await window.applySteuerraumInboxReceipts();
+    if(!result)throw Error('Черга змінилася. Застосунок повторить перевірку.');
+    message('Підтверджено документів: '+result.attached+'. Потребують уточнення: '+result.review+'.',result.review>0);
+  }catch(error){message(error.message,true);}
+  finally{apply.disabled=false;}
+};
 const draw=()=>{const selected=$('#inboxLogStatus').value,shown=rows.filter(r=>!selected||r.status===selected);
 $('#inboxLogRows').innerHTML=shown.map(r=>{const record=data.records.find(x=>x.id===r.recordId)||(data.incomeRecords||[]).find(x=>x.id===r.recordId)||(data.insuranceRecords||[]).find(x=>x.id===r.recordId)||(data.taxPaymentRecords||[]).find(x=>x.id===r.recordId);return '<tr><td>'+esc(r.processedAt?new Date(r.processedAt).toLocaleString('uk-UA'):'—')+'</td><td>'+(safeUrl(r.documentUrl)?'<a href="'+esc(safeUrl(r.documentUrl))+'" target="_blank" rel="noopener noreferrer">'+esc(r.fileName||'Документ')+' ↗</a>':esc(r.fileName||'Документ'))+'</td><td>'+esc(labels[r.status]||r.status)+'</td><td>'+(record?'<button type="button" data-log-record="'+esc(record.id)+'">'+esc(displayDate(record.date))+' · '+esc(record.company)+' · '+money(record.amount)+'</button>':r.recordId?'Операцію видалено':'—')+'</td><td>'+esc(r.message||'')+'</td></tr>';}).join('');$('#inboxLogEmpty').textContent=shown.length?'':'Записів ще немає. Наступні обробки INBOX з’являтимуться тут.';
 document.querySelectorAll('[data-log-record]').forEach(b=>b.onclick=()=>{const id=b.dataset.logRecord,expense=data.records.find(r=>r.id===id),income=(data.incomeRecords||[]).find(r=>r.id===id),insurance=(data.insuranceRecords||[]).find(r=>r.id===id),tax=(data.taxPaymentRecords||[]).find(r=>r.id===id);if(expense)openRecord(expense);else if(income)openIncomeRecord(income);else if(insurance)openPaymentRecord('insurance',insurance);else if(tax)openPaymentRecord('tax',tax);});};$('#inboxLogStatus').onchange=draw;draw();
