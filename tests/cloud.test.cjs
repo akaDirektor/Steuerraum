@@ -200,3 +200,27 @@ test('missing document report rereads the register before publishing a supersede
  assert.equal(reads,2);
  assert.equal(writes,1);
 });
+
+
+test('verified receipts can cover two expenses or share one expense without changing the ledger',()=>{
+ const {ctx}=setup();
+ const a={itemId:'first',hash:'first-hash',url:'https://tenant.sharepoint.com/first.pdf',name:'first.pdf',date:'2024-01-02'};
+ const b={itemId:'second',hash:'second-hash',url:'https://tenant.sharepoint.com/second.pdf',name:'second.pdf',date:'2024-01-02'};
+ const c={itemId:'both',hash:'shared-hash',url:'https://tenant.sharepoint.com/both.pdf',name:'both.pdf',date:'2024-01-02'};
+ const data={...reg([row('split'),row('part-1'),row('part-2'),row('unrelated')]),incomeRecords:[row('income')]};
+ const target=record=>({id:record.id,amount:record.amount,date:record.date,company:record.company});
+ const groups=[{targets:[target(data.records[0])],documents:[a,b]},
+  {targets:data.records.slice(1,3).map(target),documents:[c]}];
+ assert.equal(groups.every(group=>ctx.eligibleExpenseReceiptGroup(data,group)),true);
+ const apply=(register,group)=>ctx.appendExpenseReceiptGroup(register,group,'2024-01-03T00:00:00Z');
+ const next=clone(groups.reduce(apply,data));
+ assert.deepEqual(next.records.map(r=>r.links.length),[2,1,1,0]);
+ assert.deepEqual(next.records.map(({links,...record})=>record),data.records.map(({links,...record})=>record));
+ assert.deepEqual(next.incomeRecords,data.incomeRecords);
+ assert.equal(next.inboxProcessingLog.length,4);
+ assert.deepEqual(clone(groups.reduce(apply,next)),next);
+ const removed={...next,records:next.records.map(r=>r.id==='part-1'?{...r,links:[]}:r)};
+ assert.equal(ctx.eligibleExpenseReceiptGroup(removed,groups[1]),false);
+ const mismatched={...data,records:data.records.map(r=>r.id==='split'?{...r,amount:1001}:r)};
+ assert.equal(ctx.eligibleExpenseReceiptGroup(mismatched,groups[0]),false);
+});

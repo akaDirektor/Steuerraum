@@ -67,9 +67,9 @@ let result;try{result=checkedMerge(base,local,remote);}catch(error){pendingResol
 if(result.conflicts.length){pendingResolution={local,remote,base,item,conflicts:result.conflicts};conflict=true;remember();status('Є розбіжності в окремих даних. Обидві версії збережені автоматично — виберіть потрібні значення.',true);showResolution();return;}merged=result.data;
 }
 if(!originalPersist(merged,{fromCloud:true}))throw Error('Браузер не зміг зберегти дані. Синхронізацію призупинено.');baseline=JSON.stringify(remote);dirty=stable(data)!==stable(remote);remember();render();lastCloudEvent={kind:'load',at:new Date()};
-if(!dirty){recoveryPending=false;retryCount=0;status('✓ Синхронізовано з OneDrive.');void refreshInboxAudit();queueMissingExpenseRefresh();return;}
+if(!dirty){recoveryPending=false;retryCount=0;status('✓ Синхронізовано з OneDrive.');void refreshInboxAudit();queueMissingExpenseRefresh();queueExpenseReceiptSync();return;}
 const payload=JSON.stringify(data);activity='save';controls();
-try{const saved=await(await graph('/me/drive/items/'+encodeURIComponent(cloudFile)+'/content',{method:'PUT',headers:{'Content-Type':'application/json','If-Match':etag},body:payload})).json();if(!saved.eTag)throw Error('OneDrive не підтвердив збереження. Перевіримо автоматично.');etag=saved.eTag;baseline=payload;dirty=stable(data)!==stable(JSON.parse(payload));remember();recoveryPending=false;retryCount=0;lastCloudEvent={kind:'save',at:new Date()};status(dirty?'Нові зміни очікують синхронізації.':'✓ Усі зміни збережено в OneDrive.');void refreshInboxAudit();queueMissingExpenseRefresh();return;}catch(error){if(error.status===412){recoveryPending=true;continue;}throw error;}
+try{const saved=await(await graph('/me/drive/items/'+encodeURIComponent(cloudFile)+'/content',{method:'PUT',headers:{'Content-Type':'application/json','If-Match':etag},body:payload})).json();if(!saved.eTag)throw Error('OneDrive не підтвердив збереження. Перевіримо автоматично.');etag=saved.eTag;baseline=payload;dirty=stable(data)!==stable(JSON.parse(payload));remember();recoveryPending=false;retryCount=0;lastCloudEvent={kind:'save',at:new Date()};status(dirty?'Нові зміни очікують синхронізації.':'✓ Усі зміни збережено в OneDrive.');void refreshInboxAudit();queueMissingExpenseRefresh();queueExpenseReceiptSync();return;}catch(error){if(error.status===412){recoveryPending=true;continue;}throw error;}
 }throw Error('Реєстр зараз змінюється в іншому місці. Повторимо синхронізацію автоматично.');
 }catch(error){retry=!needsReauth&&error.status!==403&&error.status!==404;status((error.message||'З’єднання перервано.')+' Ваші зміни збережені автоматично у браузері.',true);}
 finally{busy=false;activity='';controls();if(resyncRequested&&!conflict){resyncRequested=false;queueSave(300);}else if(((dirty&&!syncError)||retry)&&!conflict&&!needsReauth)queueSave(Math.min(30000,5000*2**retryCount++));}}
@@ -315,5 +315,185 @@ return {batch,warning:pendingMoves>0,message:pendingMoves?'Прив’язки �
 }finally{bankUploadBusy=false;}
 };
 
-if(typeof setInterval==='function')setInterval(refreshMissingExpenseDocuments,missingExpenseRefreshMs);
+
+const expenseReceiptQueueFile='expense-receipt-attachments.json';
+let expenseReceiptTimer=null,expenseReceiptRunning=false,completedExpenseReceiptVersion='';
+
+function queueExpenseReceiptSync(){
+  clearTimeout(expenseReceiptTimer);
+  expenseReceiptTimer=setTimeout(syncExpenseReceiptQueue,350);
+}
+
+function receiptLogId(itemId,recordId){
+  return 'expense-receipt-'+itemId+'-'+recordId;
+}
+
+function validExpenseReceiptQueue(queue){
+  if(queue?.version!==1||!Array.isArray(queue.groups)||queue.groups.length>500)throw Error('Некоректний список рахунків');
+  const fileIds=new Set(),hashes=new Set(),targetIds=new Set();
+  for(const group of queue.groups){
+    if(!Array.isArray(group.documents)||!group.documents.length||!Array.isArray(group.targets)||!group.targets.length){
+      throw Error('Неповна група рахунків');
+    }
+    for(const doc of group.documents){
+      if(!doc.itemId||fileIds.has(doc.itemId)||typeof doc.name!=='string'||!/\.pdf$/i.test(doc.name)||
+         !Number.isSafeInteger(doc.size)||doc.size<=0||typeof doc.hash!=='string'||!doc.hash||hashes.has(doc.hash)||!/^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(doc.date)){
+        throw Error('Некоректні дані PDF');
+      }
+      fileIds.add(doc.itemId);hashes.add(doc.hash);
+    }
+    for(const target of group.targets){
+      if(!target.id||targetIds.has(target.id)||!Number.isSafeInteger(target.amount)||!target.date||typeof target.company!=='string'){
+        throw Error('Некоректна або повторна ціль рахунка');
+      }
+      targetIds.add(target.id);
+    }
+  }
+  return queue;
+}
+
+function matchingReceiptLink(record,doc){
+  return (record.links||[]).some(link=>link.driveItemId===doc.itemId||
+    link.sourceHash==='quickxor:'+doc.hash||(doc.url&&link.url===doc.url));
+}
+
+function eligibleExpenseReceiptGroup(register,group){
+  const records=group.targets.map(target=>register.records.find(row=>row.id===target.id));
+  if(records.some((record,i)=>{
+    const target=group.targets[i];
+    return !record||record.date!==target.date||record.amount!==target.amount||record.company!==target.company||
+      SteuerraumFeatures.closedYear(register,target.date.slice(0,4));
+  }))return false;
+  const targets=new Set(group.targets.map(t=>t.id));
+  const otherRecords=[...register.records.filter(record=>!targets.has(record.id)),...(register.incomeRecords||[])];
+  if(otherRecords.some(record=>group.documents.some(doc=>matchingReceiptLink(record,doc))))return false;
+  return records.every(record=>
+    (record.links||[]).every(link=>group.documents.some(doc=>link.driveItemId===doc.itemId||link.sourceHash==='quickxor:'+doc.hash))&&
+    group.documents.every(doc=>matchingReceiptLink(record,doc)||
+      !(register.inboxProcessingLog||[]).some(log=>log.id===receiptLogId(doc.itemId,record.id)&&log.status==='attached')));
+}
+
+async function readReceiptDocument(doc,inboxId,requireInbox){
+  const meta=await(await graph('/me/drive/items/'+encodeURIComponent(doc.itemId))).json();
+  if(meta.id!==doc.itemId||meta.name!==doc.name||meta.size!==doc.size||meta.file?.hashes?.quickXorHash!==doc.hash||
+    (requireInbox&&meta.parentReference?.id!==inboxId))throw Error('PDF в INBOX змінився або зник');
+  const site=new URL(meta.sharepointIds.siteUrl);
+  if(site.protocol!=='https:'||!site.hostname.endsWith('.sharepoint.com')||
+    site.origin!==new URL(meta.webUrl).origin||!/^[0-9a-f-]{36}$/i.test(meta.sharepointIds.listItemUniqueId)){
+    throw Error('OneDrive не повернув приватне посилання на PDF');
+  }
+  return {...doc,url:invoiceStableUrl(meta),parentId:meta.parentReference?.id,eTag:meta.eTag};
+}
+
+function appendExpenseReceiptGroup(register,group,at){
+  const records=register.records.map(record=>group.targets.some(t=>t.id===record.id)?{...record,
+    links:[...(record.links||[]),...group.documents.filter(doc=>!matchingReceiptLink(record,doc)).map(doc=>({
+      name:doc.name,url:doc.url,documentDate:doc.date,driveItemId:doc.itemId,sourceHash:'quickxor:'+doc.hash,
+    }))]}:record);
+  const log=new Map((register.inboxProcessingLog||[]).map(row=>[row.id,row]));
+  for(const target of group.targets)for(const doc of group.documents){
+    const id=receiptLogId(doc.itemId,target.id);
+    if(!log.has(id))log.set(id,{id,sourcePackageId:doc.itemId,sourceHash:'quickxor:'+doc.hash,
+      processedAt:at,fileName:doc.name,documentUrl:doc.url,status:'attached',recordId:target.id,
+      ledger:'expense',message:'Документ прикріплено до наявної витрати'});
+  }
+  return {...register,records,inboxProcessingLog:[...log.values()]};
+}
+
+async function archiveExpenseReceipts(root,documents,inboxId,guard){
+  if(!documents.some(doc=>doc.parentId===inboxId))return;
+  guard();
+  const parent=await(await graph(root)).json(),months=new Map();
+  for(const doc of documents){
+    if(doc.parentId!==inboxId)continue;
+    guard();
+    const month=doc.date.slice(0,7);
+    if(!months.has(month)){
+      const year=await invoiceChildFolder(parent.id,month.slice(0,4));
+      const receipts=await invoiceChildFolder(year.id,'Рахунки');
+      months.set(month,(await invoiceChildFolder(receipts.id,month.slice(5),true)).id);
+    }
+    guard();
+    const moved=await(await graph('/me/drive/items/'+encodeURIComponent(doc.itemId),{
+      method:'PATCH',headers:{'Content-Type':'application/json',...(doc.eTag?{'If-Match':doc.eTag}:{})},
+      body:JSON.stringify({parentReference:{id:months.get(month)}}),
+    })).json();
+    if(moved.parentReference?.id!==months.get(month))throw Error('Перенесення PDF не підтверджено');
+  }
+}
+
+async function syncExpenseReceiptQueue(){
+  if(expenseReceiptRunning||!cloudAccount||!configuredPath||needsReauth||conflict)return;
+  expenseReceiptRunning=true;
+  const scope=cloudScope(),root=cloudRootPath();
+  const guard=()=>{if(scope!==cloudScope()||needsReauth||conflict)throw Error('Підключення OneDrive змінилося');};
+  try{
+    let queueFile;
+    try{queueFile=await(await graph(root+'/'+expenseReceiptQueueFile)).json();}
+    catch(error){if(error.status===404)return;throw error;}
+    const queueVersion=scope+'|'+queueFile.eTag;
+    if(completedExpenseReceiptVersion===queueVersion)return;
+    const url=new URL(queueFile['@microsoft.graph.downloadUrl']);
+    if(url.protocol!=='https:'||!queueFile.eTag||queueFile.size>1024*1024)throw Error('Некоректна черга рахунків');
+    const response=await fetch(url.href,{cache:'no-store',credentials:'omit'});
+    if(!response.ok)throw Error('Черга рахунків недоступна');
+    const queue=validExpenseReceiptQueue(await response.json());
+    if(!queue.groups.length)return;
+    const inbox=await(await graph(root+'/INBOX?$select=id')).json();
+    const {item,remote}=await readRemote();
+    guard();
+    const ready=[];
+    for(const group of queue.groups){
+      if(!eligibleExpenseReceiptGroup(remote,group))continue;
+      const alreadyAttached=group.targets.every(target=>group.documents.every(doc=>
+        matchingReceiptLink(remote.records.find(r=>r.id===target.id),doc)));
+      try{
+        guard();
+        const documents=await Promise.all(group.documents.map(doc=>readReceiptDocument(doc,inbox.id,!alreadyAttached)));
+        ready.push({...group,documents});
+      }catch(error){console.warn('Steuerraum: PDF потребує перевірки.',error.status||'');}
+    }
+    if(ready.length<queue.groups.length&&typeof message==='function')message('Деякі рахунки в INBOX потребують повторної звірки.',true);
+    if(!ready.length)return;
+    const at=new Date().toISOString();
+    const next=validate(ready.reduce((register,group)=>appendExpenseReceiptGroup(register,group,at),remote));
+    let verified=remote;
+    if(stable(next)!==stable(remote)){
+      SteuerraumFeatures.assertClosedYearsUnchanged(remote,next);
+      guard();
+      await backupRecovery(remote,remote,null);
+      guard();
+      const currentQueue=await(await graph(root+'/'+expenseReceiptQueueFile+'?$select=eTag')).json();
+      guard();
+      if(currentQueue.eTag!==queueFile.eTag){queueExpenseReceiptSync();return;}
+      const saved=await(await graph('/me/drive/items/'+encodeURIComponent(item.id)+'/content',{
+        method:'PUT',headers:{'Content-Type':'application/json','If-Match':item.eTag},body:JSON.stringify(next),
+      })).json();
+      if(!saved.eTag)throw Error('OneDrive не підтвердив запис');
+      verified=(await readRemote()).remote;
+      guard();
+      await syncCloud();
+    }
+    const documents=ready.flatMap(group=>group.targets.every(target=>{
+      const record=verified.records.find(row=>row.id===target.id);
+      return record&&group.documents.every(doc=>matchingReceiptLink(record,doc)&&
+        verified.inboxProcessingLog?.some(log=>log.id===receiptLogId(doc.itemId,target.id)&&log.status==='attached'));
+    })?group.documents:[]);
+    if(documents.length!==ready.reduce((total,group)=>total+group.documents.length,0)){
+      throw Error('OneDrive не підтвердив усі вкладення');
+    }
+    await archiveExpenseReceipts(root,documents,inbox.id,guard);
+    if(ready.length===queue.groups.length)completedExpenseReceiptVersion=queueVersion;
+    void refreshInboxAudit();
+  }catch(error){
+    if(error.status===412)queueExpenseReceiptSync();
+    else {
+      console.warn('Steuerraum: не вдалося завершити прикріплення рахунків.',error.status||'');
+      if(typeof message==='function')message('Не вдалося завершити обробку рахунків у OneDrive. Застосунок повторить спробу.',true);
+    }
+  }finally{expenseReceiptRunning=false;}
+}
+
+
+if(typeof setInterval==='function')setInterval(()=>{void refreshMissingExpenseDocuments();void syncExpenseReceiptQueue();},missingExpenseRefreshMs);
 init();
