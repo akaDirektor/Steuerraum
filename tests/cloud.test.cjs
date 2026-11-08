@@ -19,6 +19,7 @@ function setup(fetchImpl){
  });
  vm.runInContext(fs.readFileSync('sync-core.js','utf8').replace(/^export /gm,''),ctx);
  vm.runInContext(fs.readFileSync('features.js','utf8'),ctx);
+ vm.runInContext(fs.readFileSync('expense-document-export.js','utf8').replace(/^export /gm,''),ctx);
  const source=fs.readFileSync('cloud-entry.js','utf8').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'');
  vm.runInContext(source,ctx);
  vm.runInContext("cloudAccount={homeAccountId:'test',username:'test@example.org'};configuredPath='private/folder';initializing=false;authReady=true;",ctx);
@@ -125,4 +126,77 @@ if(url.includes('/items/old-month?'))return reply({parentReference:{id:'receipts
 return original(url,options);
 };
 const result=await ctx.window.applySteuerraumInvoiceAttachments();assert.equal(result.warning,false);assert.equal(s.monthMoved,true);assert.equal(s.remote.records[0].amount,1000);assert.equal(s.remote.records[0].links.length,1);assert.ok(s.remote.records[0].links[0].url.includes('22222222'));assert.equal(ctx.expenseArchivePath('https://public.example/unrelated.pdf'),null);
+});
+
+
+test('missing document report refresh replaces resolved rows and excludes other ledgers and statement attachments',async()=>{
+ const before=reg([
+  {...row('linked'),links:[{url:'https://example.org/linked.pdf'}]},
+  {...row('bank'),date:'2025-01-01',description:'Payment IBAN DE12 3456 7890 1234 5678 90',bankAccountKey:'private',links:[{url:'https://example.org/statement.pdf'}]},
+  {...row('candidate'),date:'2025-01-02',company:'Test Vendor'},
+ ]);
+ before.bankImports=[{sourceFileItemId:'statement',sourceUrl:'https://example.org/statement.pdf'}];
+ before.incomeRecords=[row('income')];
+ let remote=before,version='register-v1',exportVersion='export-v1';
+ const exports=[];
+ const {ctx}=setup(async(url,options={})=>{
+  const response=(value,status=200)=>({ok:status<400,status,json:async()=>clone(value)});
+  if(url==='https://download.example/register')return response(remote);
+  if(url.endsWith('/register-2025.json'))return response({id:'register',eTag:version,size:100,'@microsoft.graph.downloadUrl':'https://download.example/register'});
+  if(url.endsWith('/register-2025.json?$select=id,eTag'))return response({id:'register',eTag:version});
+  if(url.includes('/INBOX:/children'))return response({value:[
+   {id:'candidate-file',file:{},name:'2025-01-03_Test_Vendor_10.00EUR.pdf',webUrl:'https://example.org/candidate.pdf'},
+   {id:'statement',file:{},name:'2025-01-01_Example_10.00EUR.pdf',webUrl:'https://example.org/statement.pdf'},
+  ]});
+  if(url.includes(':/children'))return response({value:[]});
+  if(url.endsWith('/missing-expense-documents.json?$select=id,eTag,file'))return response({id:'export',eTag:exportVersion,file:{}});
+  if(url.endsWith('/items/export/content')&&options.method==='PUT'){
+   assert.equal(options.headers['If-Match'],exportVersion);
+   exports.push(JSON.parse(options.body));
+   exportVersion+='n';
+   return response({id:'export',eTag:exportVersion});
+  }
+  throw Error('Unexpected request: '+url);
+ });
+ await ctx.refreshMissingExpenseDocuments();
+ assert.deepEqual(exports[0].summary,{total:3,withDocuments:1,withoutDocuments:2,uploadedUnlinked:1});
+ assert.equal(exports[0].summaryByYear['2025'].withoutDocuments,2);
+ const bank=exports[0].transactions.find(x=>x.transactionId==='bank');
+ assert.equal(bank.documentStatus,'missing');
+ assert.equal(bank.source,'bank_account');
+ assert.doesNotMatch(JSON.stringify(bank),/DE12|private|statement\.pdf/);
+ const candidate=exports[0].transactions.find(x=>x.transactionId==='candidate');
+ assert.equal(candidate.documentStatus,'uploaded_unlinked');
+ assert.equal(candidate.candidateDocuments[0].itemId,'candidate-file');
+ assert.equal(candidate.amountCents,1000);
+ assert.equal(candidate.currency,'EUR');
+ assert.ok(Number.isFinite(Date.parse(exports[0].lastSuccessfulSyncAt)));
+ version='register-v2';
+ remote={...before,records:before.records.map(r=>r.id==='candidate'?{...r,links:[{url:'https://example.org/candidate.pdf'}]}:r)};
+ await ctx.refreshMissingExpenseDocuments();
+ assert.deepEqual(exports[1].transactions.map(row=>row.transactionId),['bank']);
+ assert.equal(exports[1].summary.withDocuments,2);
+ assert.equal(exports.length,2);
+});
+
+test('missing document report rereads the register before publishing a superseded snapshot',async()=>{
+ let reads=0, writes=0;
+ const {ctx}=setup(async(url,options={})=>{
+  const response=(value,status=200)=>({ok:status<400,status,json:async()=>clone(value)});
+  if(url==='https://download.example/register')return response(reg([row(reads===1?'old':'current')]));
+  if(url.endsWith('/register-2025.json'))return response({id:'register',eTag:'v'+(++reads),size:100,'@microsoft.graph.downloadUrl':'https://download.example/register'});
+  if(url.endsWith('/register-2025.json?$select=id,eTag'))return response({id:'register',eTag:'v2'});
+  if(url.includes(':/children'))return response({value:[]});
+  if(url.endsWith('/missing-expense-documents.json?$select=id,eTag,file'))return response({},404);
+  if(url.includes('/missing-expense-documents.json:/content')&&options.method==='PUT'){
+   writes++;
+   assert.equal(options.headers['If-None-Match'],'*');
+   assert.deepEqual(JSON.parse(options.body).transactions.map(row=>row.transactionId),['current']);
+   return response({id:'export',eTag:'created'});
+  }
+  throw Error('Unexpected request: '+url);
+ });
+ await ctx.refreshMissingExpenseDocuments();
+ assert.equal(reads,2);
+ assert.equal(writes,1);
 });

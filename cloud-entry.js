@@ -1,4 +1,5 @@
 import {mergeRegisters,stable} from './sync-core.js';
+import {buildMissingExpenseDocuments} from './expense-document-export.js';
 import { PublicClientApplication, InteractionRequiredAuthError } from '@azure/msal-browser';
 const client=new PublicClientApplication({auth:{clientId:'68ef307f-52fb-4b5f-9b90-5eb4bdbf5dbf',authority:'https://login.microsoftonline.com/ab8e99bd-8256-41fa-89bc-a5ddefc4613c',redirectUri:location.origin+location.pathname,navigateToLoginRequestUrl:false},cache:{cacheLocation:'sessionStorage'}});
 const scopes=['https://graph.microsoft.com/Files.ReadWrite'];
@@ -66,9 +67,9 @@ let result;try{result=checkedMerge(base,local,remote);}catch(error){pendingResol
 if(result.conflicts.length){pendingResolution={local,remote,base,item,conflicts:result.conflicts};conflict=true;remember();status('Є розбіжності в окремих даних. Обидві версії збережені автоматично — виберіть потрібні значення.',true);showResolution();return;}merged=result.data;
 }
 if(!originalPersist(merged,{fromCloud:true}))throw Error('Браузер не зміг зберегти дані. Синхронізацію призупинено.');baseline=JSON.stringify(remote);dirty=stable(data)!==stable(remote);remember();render();lastCloudEvent={kind:'load',at:new Date()};
-if(!dirty){recoveryPending=false;retryCount=0;status('✓ Синхронізовано з OneDrive.');void refreshInboxAudit();return;}
+if(!dirty){recoveryPending=false;retryCount=0;status('✓ Синхронізовано з OneDrive.');void refreshInboxAudit();queueMissingExpenseRefresh();return;}
 const payload=JSON.stringify(data);activity='save';controls();
-try{const saved=await(await graph('/me/drive/items/'+encodeURIComponent(cloudFile)+'/content',{method:'PUT',headers:{'Content-Type':'application/json','If-Match':etag},body:payload})).json();if(!saved.eTag)throw Error('OneDrive не підтвердив збереження. Перевіримо автоматично.');etag=saved.eTag;baseline=payload;dirty=stable(data)!==stable(JSON.parse(payload));remember();recoveryPending=false;retryCount=0;lastCloudEvent={kind:'save',at:new Date()};status(dirty?'Нові зміни очікують синхронізації.':'✓ Усі зміни збережено в OneDrive.');void refreshInboxAudit();return;}catch(error){if(error.status===412){recoveryPending=true;continue;}throw error;}
+try{const saved=await(await graph('/me/drive/items/'+encodeURIComponent(cloudFile)+'/content',{method:'PUT',headers:{'Content-Type':'application/json','If-Match':etag},body:payload})).json();if(!saved.eTag)throw Error('OneDrive не підтвердив збереження. Перевіримо автоматично.');etag=saved.eTag;baseline=payload;dirty=stable(data)!==stable(JSON.parse(payload));remember();recoveryPending=false;retryCount=0;lastCloudEvent={kind:'save',at:new Date()};status(dirty?'Нові зміни очікують синхронізації.':'✓ Усі зміни збережено в OneDrive.');void refreshInboxAudit();queueMissingExpenseRefresh();return;}catch(error){if(error.status===412){recoveryPending=true;continue;}throw error;}
 }throw Error('Реєстр зараз змінюється в іншому місці. Повторимо синхронізацію автоматично.');
 }catch(error){retry=!needsReauth&&error.status!==403&&error.status!==404;status((error.message||'З’єднання перервано.')+' Ваші зміни збережені автоматично у браузері.',true);}
 finally{busy=false;activity='';controls();if(resyncRequested&&!conflict){resyncRequested=false;queueSave(300);}else if(((dirty&&!syncError)||retry)&&!conflict&&!needsReauth)queueSave(Math.min(30000,5000*2**retryCount++));}}
@@ -89,9 +90,133 @@ el('cloudLoad').onclick=()=>loadCloud();
 el('cloudSave').onclick=()=>saveCloud();
 el('cloudLogout').onclick=async()=>{if(dirty){await syncCloud();if(dirty){status('Спершу завершимо автоматичну синхронізацію перед виходом.',true);return;}}clearTimeout(saveTimer);if(typeof setInboxAuditState==='function')setInboxAuditState({status:'unknown',items:[],checkedAt:null});cloudFile=null;etag=null;baseline=null;cloudAccount=null;authReady=false;lastCloudEvent=null;controls();await client.logoutRedirect({postLogoutRedirectUri:location.origin+location.pathname});};
 async function init(){controls();try{await client.initialize();const result=await client.handleRedirectPromise();cloudAccount=result?.account||client.getActiveAccount()||client.getAllAccounts()[0]||null;initializing=false;if(cloudAccount){client.setActiveAccount(cloudAccount);configuredPath=localStorage.getItem(accountKey())||'';controls();await token();if(configuredPath){recoverJournal();await syncCloud();}else status('Вхід Microsoft підтверджено. Вкажіть папку реєстру через меню «Ще».');}else status('Увійдіть у Microsoft для синхронізації. Локальні дані залишаються збереженими.');}catch(error){status('Не вдалося завершити підключення: '+(error.errorMessage||error.message),true);}finally{initializing=false;controls();}}
+async function listCloudChildren(path){
+  const items=[];
+  while(path){
+    const result=await(await graph(path)).json();
+    if(!Array.isArray(result.value))throw Error('Не вдалося прочитати папку OneDrive');
+    items.push(...result.value);
+    if(items.length>20000)throw Error('Папка завелика для повної перевірки');
+    path=null;
+    if(result['@odata.nextLink']){
+      const next=new URL(result['@odata.nextLink']);
+      if(next.origin!=='https://graph.microsoft.com'||!next.pathname.startsWith('/v1.0/'))throw Error('Некоректна адреса сторінки OneDrive');
+      path=next.pathname.slice('/v1.0'.length)+next.search;
+    }
+  }
+  return items;
+}
+
+const childrenQuery='?$select=id,name,folder,file,webUrl&$top=200';
+function cloudRootPath(){
+  return '/me/drive/root:/'+pathParts(configuredPath).map(encodeURIComponent).join('/');
+}
+function cloudScope(){
+  return cloudAccount?.homeAccountId+'|'+configuredPath;
+}
+
 let inboxBusy=false;
-async function refreshInboxAudit(){const scope=cloudAccount?.homeAccountId+'|'+configuredPath;const publish=state=>{if(scope===cloudAccount?.homeAccountId+'|'+configuredPath&&typeof setInboxAuditState==='function')setInboxAuditState(state);};if(!cloudAccount||!configuredPath||needsReauth){publish({status:'error',items:[],checkedAt:null});return;}if(inboxBusy)return;inboxBusy=true;publish({status:'loading'});try{let path='/me/drive/root:/'+pathParts(configuredPath).map(encodeURIComponent).join('/')+'/INBOX:/children?$select=id,name,folder,file,webUrl&$top=200',items=[];while(path){const result=await(await graph(path)).json();if(!Array.isArray(result.value))throw Error('Не вдалося прочитати INBOX');items.push(...result.value);if(items.length>20000)throw Error('INBOX завеликий для повної перевірки');path=null;if(result['@odata.nextLink']){const next=new URL(result['@odata.nextLink']);if(next.origin!=='https://graph.microsoft.com'||!next.pathname.startsWith('/v1.0/'))throw Error('Некоректна адреса сторінки INBOX');path=next.pathname.slice('/v1.0'.length)+next.search;}}publish({status:'ready',items,checkedAt:new Date().toISOString()});}catch(error){publish(error.status===404?{status:'ready',items:[],checkedAt:new Date().toISOString()}:{status:'error'});}finally{inboxBusy=false;}}
+async function refreshInboxAudit(){
+  const scope=cloudScope();
+  const publish=state=>{if(scope===cloudScope()&&typeof setInboxAuditState==='function')setInboxAuditState(state);};
+  if(!cloudAccount||!configuredPath||needsReauth){publish({status:'error',items:[],checkedAt:null});return;}
+  if(inboxBusy)return;
+  inboxBusy=true;
+  publish({status:'loading'});
+  try{
+    const items=await listCloudChildren(cloudRootPath()+'/INBOX:/children'+childrenQuery);
+    publish({status:'ready',items,checkedAt:new Date().toISOString()});
+  }catch(error){
+    publish(error.status===404?{status:'ready',items:[],checkedAt:new Date().toISOString()}:{status:'error'});
+  }finally{inboxBusy=false;}
+}
 window.refreshSteuerraumInbox=refreshInboxAudit;
+
+const missingExpenseFile='missing-expense-documents.json';
+const missingExpenseRefreshMs=15*60*1000;
+let missingExpenseInventory=null,missingExpenseRefresh=null,missingExpenseRequested=false,missingExpenseTimer=null;
+
+function queueMissingExpenseRefresh(){
+  clearTimeout(missingExpenseTimer);
+  missingExpenseTimer=setTimeout(refreshMissingExpenseDocuments,500);
+}
+
+async function listOptionalChildren(path){
+  try{return await listCloudChildren(path+childrenQuery);}
+  catch(error){if(error.status===404)return [];throw error;}
+}
+
+async function expenseDocumentInventory(root,scope,register){
+  const years=[...new Set(register.records.map(record=>record.date.slice(0,4)))].sort();
+  const key=scope+'|'+years.join(',');
+  if(missingExpenseInventory?.key===key&&Date.now()-missingExpenseInventory.at<5*60*1000){
+    return missingExpenseInventory.files;
+  }
+  const files=[];
+  function collect(items,location){
+    for(const item of items)if(item.file)files.push({id:item.id,name:item.name,url:item.webUrl,location});
+  }
+  async function collectArchive(items,depth){
+    collect(items,'archive');
+    if(!depth)return;
+    const folders=items.filter(item=>item.folder&&!/^(?:bank|invoices|інвойси|_.*)$/i.test(item.name));
+    for(let i=0;i<folders.length;i+=4){
+      await Promise.all(folders.slice(i,i+4).map(async folder=>{
+        const children=await listOptionalChildren('/me/drive/items/'+encodeURIComponent(folder.id)+'/children');
+        await collectArchive(children,depth-1);
+      }));
+    }
+  }
+  collect(await listOptionalChildren(root+'/INBOX:/children'),'inbox');
+  for(const year of years){
+    await collectArchive(await listOptionalChildren(root+'/'+year+':/children'),2);
+  }
+  missingExpenseInventory={key,at:Date.now(),files};
+  return files;
+}
+
+async function syncMissingExpenseDocuments(){
+  const scope=cloudScope(),root=cloudRootPath();
+  const {item,remote}=await readRemote();
+  if(cloudScope()!==scope||needsReauth)return;
+  const path=root+'/'+missingExpenseFile;
+  let existing=null;
+  try{existing=await(await graph(path+'?$select=id,eTag,file')).json();}
+  catch(error){if(error.status!==404)throw error;}
+  if(existing&&(!existing.id||!existing.eTag||!existing.file))throw Error('OneDrive не повернув версію експорту');
+  const files=await expenseDocumentInventory(root,scope,remote);
+  if(cloudScope()!==scope||needsReauth)return;
+  const latest=await(await graph(filePath()+'?$select=id,eTag')).json();
+  if(cloudScope()!==scope||needsReauth)return;
+  if(latest.id!==item.id||latest.eTag!==item.eTag){missingExpenseRequested=true;return;}
+  const report=buildMissingExpenseDocuments(remote,files,new Date().toISOString());
+  const target=existing?'/me/drive/items/'+encodeURIComponent(existing.id)+'/content':
+    path+':/content?@microsoft.graph.conflictBehavior=fail';
+  const condition=existing?{'If-Match':existing.eTag}:{'If-None-Match':'*'};
+  const saved=await(await graph(target,{method:'PUT',headers:{'Content-Type':'application/json',...condition},
+    body:JSON.stringify(report,null,2)})).json();
+  if(!saved.id||!saved.eTag)throw Error('OneDrive не підтвердив експорт');
+}
+
+function refreshMissingExpenseDocuments(){
+  if(!cloudAccount||!configuredPath||needsReauth)return;
+  missingExpenseRequested=true;
+  if(!missingExpenseRefresh){
+    missingExpenseRefresh=(async()=>{
+      for(let attempt=0;missingExpenseRequested&&attempt<3;attempt++){
+        missingExpenseRequested=false;
+        if(!cloudAccount||!configuredPath||needsReauth)return;
+        try{await syncMissingExpenseDocuments();}
+        catch(error){
+          if(error.status===409||error.status===412){missingExpenseRequested=true;continue;}
+          console.warn('Steuerraum: не вдалося оновити список витрат без документів.',error.status||'');
+        }
+      }
+    })().finally(()=>{missingExpenseRefresh=null;});
+  }
+  return missingExpenseRefresh;
+}
+
 
 let bankUploadBusy=false;
 window.uploadSteuerraumBank=async function(file,period){const importScope=period.scope||'all';if(!['all','income','expenses'].includes(importScope))throw Error('Некоректний відбір виписки');if(bankUploadBusy||busy)throw Error('Дочекайся завершення поточної синхронізації.');if(!cloudAccount||!configuredPath||needsReauth)throw Error('Спочатку підключи OneDrive.');if(!file||file.size>20*1024*1024)throw Error('Максимальний розмір виписки — 20 МБ.');const extension=String(file.name).split('.').at(-1).toLowerCase();if(!['csv','xlsx','xls','pdf','txt'].includes(extension))throw Error('Оберіть CSV, Excel, PDF або TXT.');bankUploadBusy=true;const created=[];let retained=false;try{await syncCloud();if(conflict||dirty||!cloudFile)throw Error('Спочатку заверши звірку змін із OneDrive.');if(!period.unassigned&&SteuerraumFeatures.closedYear(data,period.year))throw Error('Рік закритий. Спочатку відкрий його для редагування.');const bytes=await file.arrayBuffer(),hashBytes=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),sourceHash=[...hashBytes].map(x=>x.toString(16).padStart(2,'0')).join('');const prepared=extension==='csv'&&period.unassigned?await window.SteuerraumBank.parse(bytes,{name:file.name,register:data}):null;if(prepared&&SteuerraumFeatures.closedYear(data,prepared.year))throw Error('Рік '+prepared.year+' закритий. Спочатку відкрий його для редагування.');const existing=(data.bankImports||[]).find(x=>x.status!=='cancelled'&&!(x.status==='completed'&&SteuerraumFeatures.statementHasDeferredRows(x))&&x.sourceHash===sourceHash&&(x.importScope||'all')===importScope&&(period.unassigned||String(x.year)===String(period.year))&&(period.unassigned||(x.importType||'business')===(period.ledger||'business')));if(existing){if(prepared&&existing.status!=='completed'&&!existing.previewRows?.length){const ready={...existing,...prepared,importScope};if(!persist({...data,bankImports:data.bankImports.map(x=>x.id===existing.id?ready:x)}))throw Error('Не вдалося зберегти розподіл виписки.');await syncCloud();return {duplicate:true,entry:ready,prepared:true};}return {duplicate:true,entry:existing};}const uuid=crypto.randomUUID(),packageId=uuid.replaceAll('-','').slice(0,8),base=(period.unassigned?'STATEMENT':period.year)+'-'+(period.ledger==='insurance'?'INSURANCE':period.ledger==='tax'?'TAX':'BANK')+'_'+packageId;let entry={id:'bank-'+uuid,year:period.unassigned?null:String(period.year),reviewRequired:true,importScope,periodFrom:null,coveredThrough:null,periodBasis:'pending',uploadedAt:new Date().toISOString(),status:'queued',importType:period.ledger||'business',sourceName:file.name,sourceHash,sourcePackageId:packageId,...(prepared||{})};SteuerraumFeatures.validateBankImports([entry]);const parent='/me/drive/root:/'+pathParts(configuredPath).map(encodeURIComponent).join('/');let folder;try{folder=await(await graph(parent+'/INBOX')).json();}catch(error){if(error.status!==404)throw error;try{folder=await(await graph(parent+':/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'INBOX',folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();}catch(createError){if(createError.status!==409)throw createError;folder=await(await graph(parent+'/INBOX')).json();}}if(!folder.id)throw Error('Не вдалося відкрити INBOX.');const path='/me/drive/items/'+encodeURIComponent(folder.id)+':/'+base,uploaded=await(await graph(path+'.'+extension+':/content',{method:'PUT',headers:{'Content-Type':file.type||'application/octet-stream','If-None-Match':'*'},body:bytes})).json();if(!uploaded.id||!uploaded.webUrl)throw Error('OneDrive не підтвердив файл.');created.push(uploaded.id);entry={...entry,sourceFileItemId:uploaded.id,sourceUrl:uploaded.webUrl};const manifest={kind:period.ledger==='insurance'?'insurance_statement':period.ledger==='tax'?'tax_payment_statement':'bank_statement',bankImport:entry,sourceFileName:base+'.'+extension,importScope,instructions:period.unassigned?'Prepare all source rows in previewRows in bankImports only, including both directions. Preserve bankImport.importScope (all, income=credits, expenses=debits), which the owner can change before confirmation. Rows outside scope are skipped without permanent exclusions. Infer year and period from file. Propose routing into expense, income, insurance, tax, or ignore; leave uncertain categories unassigned. Never post financial records before user confirmation in allocation screen.':period.ledger==='insurance'?'Import only health-insurance contributions and refunds into insuranceRecords, outside business expenses.':period.ledger==='tax'?'Import only tax payments and refunds into taxPaymentRecords, preserving payment date and attributed tax year. Never guess an unknown tax year or advance/assessment type.':'Import outgoing debits into the expense ledger and incoming credits into the income ledger. Keep bank income pending manual review with an unassigned country group. Preserve overlapping statement deduplication and put ambiguous matches in unresolvedRows. Statement is not an invoice.'};const note=await(await graph(path+'.txt:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8','If-None-Match':'*'},body:'STEUERRAUM BANK STATEMENT\n'+JSON.stringify(manifest,null,2)})).json();if(!note.id)throw Error('OneDrive не підтвердив опис виписки.');created.push(note.id);entry.manifestItemId=note.id;if(!persist({...data,bankImports:SteuerraumFeatures.validateBankImports([...(data.bankImports||[]),entry])}))throw Error('Не вдалося додати виписку до історії.');retained=true;await syncCloud();void refreshInboxAudit();return {duplicate:false,entry};}catch(error){if(!retained)for(const id of created){try{await graph('/me/drive/items/'+encodeURIComponent(id),{method:'DELETE'});}catch{}}throw error;}finally{bankUploadBusy=false;}};
@@ -190,4 +315,5 @@ return {batch,warning:pendingMoves>0,message:pendingMoves?'Прив’язки �
 }finally{bankUploadBusy=false;}
 };
 
+if(typeof setInterval==='function')setInterval(refreshMissingExpenseDocuments,missingExpenseRefreshMs);
 init();
