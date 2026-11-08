@@ -340,7 +340,8 @@ function validExpenseReceiptQueue(queue){
     if(group.ledger==='income'&&(!group.logId||group.documents.length!==1||group.targets.length!==1))throw Error('Некоректна прив’язка інвойсу');
     for(const doc of group.documents){
       if(!doc.itemId||fileIds.has(doc.itemId)||typeof doc.name!=='string'||!/\.pdf$/i.test(doc.name)||
-         !Number.isSafeInteger(doc.size)||doc.size<=0||typeof doc.hash!=='string'||!doc.hash||hashes.has(doc.hash)||!/^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(doc.date)){
+         !Number.isSafeInteger(doc.size)||doc.size<=0||typeof doc.hash!=='string'||!doc.hash||hashes.has(doc.hash)||
+         (doc.archiveParentId!==undefined&&(typeof doc.archiveParentId!=='string'||!doc.archiveParentId))||!/^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(doc.date)){
         throw Error('Некоректні дані PDF');
       }
       fileIds.add(doc.itemId);hashes.add(doc.hash);
@@ -381,8 +382,14 @@ function eligibleExpenseReceiptGroup(register,group){
 async function readReceiptDocument(doc,inboxId,requireInbox){
   const fields='id,name,size,file,parentReference,sharepointIds,webUrl,eTag';
   const meta=await(await graph('/me/drive/items/'+encodeURIComponent(doc.itemId)+'?$select='+fields)).json();
+  const expectedParent=doc.archiveParentId||inboxId;
   if(meta.id!==doc.itemId||meta.name!==doc.name||meta.size!==doc.size||meta.file?.hashes?.quickXorHash!==doc.hash||
-    (requireInbox&&meta.parentReference?.id!==inboxId))throw Error('PDF в INBOX змінився або зник');
+    (requireInbox&&meta.parentReference?.id!==expectedParent))throw Error('PDF змінився або зник');
+  if(doc.archiveParentId&&requireInbox){
+    const archivePath=decodeURIComponent(String(meta.parentReference?.path||'').split('root:')[1]||'');
+    const yearRoot='/'+pathParts(configuredPath).join('/')+'/'+doc.date.slice(0,4);
+    if(archivePath!==yearRoot&&!archivePath.startsWith(yearRoot+'/'))throw Error('PDF знаходиться поза архівом року');
+  }
   const site=new URL(meta.sharepointIds.siteUrl);
   if(site.protocol!=='https:'||!site.hostname.endsWith('.sharepoint.com')||
     site.origin!==new URL(meta.webUrl).origin||!/^[0-9a-f-]{36}$/i.test(meta.sharepointIds.listItemUniqueId)){
@@ -408,11 +415,13 @@ function appendExpenseReceiptGroup(register,group,at){
 }
 
 async function archiveExpenseReceipts(root,documents,inboxId,guard){
-  if(!documents.some(doc=>doc.parentId===inboxId))return;
+  const needsMove=doc=>doc.parentId===inboxId||
+    (doc.relocate===true&&doc.archiveParentId&&doc.parentId===doc.archiveParentId);
+  if(!documents.some(needsMove))return;
   guard();
   const parent=await(await graph(root)).json(),months=new Map();
   for(const doc of documents){
-    if(doc.parentId!==inboxId)continue;
+    if(!needsMove(doc))continue;
     guard();
     const month=doc.date.slice(0,7),kind=doc.ledger==='income'?'Інвойси':'Рахунки',key=kind+'|'+month;
     if(!months.has(key)){

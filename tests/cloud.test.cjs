@@ -249,3 +249,18 @@ test('INBOX requests the private PDF metadata and preserves the financial fields
  assert.equal(next.inboxProcessingLog[0].ledger,'income');
  assert.match(links[0].url,/Doc\.aspx\?sourcedoc=/);
 });
+
+
+test('INBOX can attach the existing archive copy and checks its exact parent and year',async()=>{
+ let path='/drive/root:/private/folder/2024/02';
+ const {ctx}=setup(async()=>({ok:true,json:async()=>({
+  id:'archived',name:'receipt.pdf',size:20,file:{hashes:{quickXorHash:'hash'}},
+  parentReference:{id:'archive',path},webUrl:'https://tenant.sharepoint.com/receipt.pdf',
+  sharepointIds:{siteUrl:'https://tenant.sharepoint.com/site',listItemUniqueId:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'},
+ })}));
+ const doc={itemId:'archived',name:'receipt.pdf',size:20,hash:'hash',date:'2024-02-01',archiveParentId:'archive'};
+ assert.equal((await ctx.readReceiptDocument(doc,'inbox',true)).parentId,'archive');
+ await assert.rejects(ctx.readReceiptDocument({...doc,archiveParentId:'other'},'inbox',true),/PDF/);
+ path='/drive/root:/private/elsewhere/2024/02';
+ await assert.rejects(ctx.readReceiptDocument(doc,'inbox',true),/поза архівом/);
+});
